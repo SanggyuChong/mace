@@ -395,6 +395,10 @@ def main() -> None:
             args.start_swa = (
                 args.max_num_epochs // 4 * 3
             )  # if not set start swa at 75% of training
+        if args.num_swa is None:
+            args.num_swa = (
+                args.max_num_epochs
+            ) # if not set ensure swa continues until end of max_num_epochs
         if args.loss == "forces_only":
             logging.info("Can not select swa with forces only loss.")
         elif args.loss == "virials":
@@ -435,6 +439,7 @@ def main() -> None:
                 anneal_strategy="linear",
             ),
             start=args.start_swa,
+            num_epochs=args.num_swa,
             loss_fn=loss_fn_energy,
         )
 

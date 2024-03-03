@@ -403,6 +403,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument(
+        "--num_swa",
+        help="Number of epochs for which swa is run",
+        type=int,
+        default=None,
+    )    
+    parser.add_argument(
         "--ema",
         help="use Exponential Moving Average",
         action="store_true",
@@ -490,6 +496,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "batch_size",
             "max_num_epochs",
             "start_swa",
+            "num_swa",
             "energy_weight",
             "forces_weight",
         ],
