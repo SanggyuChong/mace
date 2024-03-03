@@ -201,7 +201,7 @@ def train(
 
                     elif (epoch - swa.start) >= swa.num_epochs:
                         logging.info(
-                            f"Stopping optimization after {patience_counter} epochs of swa, as specified by the user"
+                            f"Stopping optimization after {(epoch - swa.start)} epochs of swa, as specified by the user"
                         )
                         break
 
