@@ -198,6 +198,7 @@ def train(
                             f"Stopping optimization after {patience_counter} epochs without improvement and starting swa"
                         )
                         swa.start = epoch
+                        checkpoint_handler.io.swa_start = epoch
 
                     elif (epoch - swa.start) >= swa.num_epochs:
                         logging.info(
