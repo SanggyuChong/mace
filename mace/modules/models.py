@@ -23,6 +23,7 @@ from .blocks import (
     LinearReadoutBlock,
     NonLinearDipoleReadoutBlock,
     NonLinearReadoutBlock,
+    NonLinearReadoutBlockLLPR,
     RadialEmbeddingBlock,
     ScaleShiftBlock,
 )
@@ -34,6 +35,8 @@ from .utils import (
     get_symmetric_displacement,
 )
 
+import copy
+from torch.utils.data import DataLoader
 # pylint: disable=C0302
 
 
@@ -237,6 +240,9 @@ class MACE(torch.nn.Module):
         # Concatenate node features
         node_feats_out = torch.cat(node_feats_list, dim=-1)
 
+        for entry in node_feats_list:
+            print(entry)
+
         # Sum over energy contributions
         contributions = torch.stack(energies, dim=-1)
         total_energy = torch.sum(contributions, dim=-1)  # [n_graphs, ]
@@ -265,6 +271,219 @@ class MACE(torch.nn.Module):
             "displacement": displacement,
             "node_feats": node_feats_out,
         }
+
+
+@compile_mode("script")
+class MACE_LLPR(MACE):
+    def __init__(
+            self,
+            model: MACE,
+            per_atom: bool,
+            **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        # deepcopy the original model
+        self.model = copy.deepcopy(model)
+
+        # determine ll_feat size from readout layers
+        self.hidden_size = 0
+        for readout in self.model.readouts:
+            if readout.original_name == "LinearReadoutBlock":
+                for size, _ in readout.linear.irreps_in:
+                    self.hidden_size += size
+            elif readout.original_name == "NonLinearReadoutBlock":
+                # wrap nonlinear readout block to obtain true ll_feat
+                readout = NonLinearReadoutBlockLLPR(readout)
+                for size, _ in readout.linear_2.irreps_in:
+                    self.hidden_size += size
+            else:
+                raise TypeError("Unknown readout for LLPR!")
+
+        print(self.hidden_size)
+
+        # initialize (inv_)covariance matrices
+        self.register_buffer("covariance",
+                             torch.zeros((self.hidden_size, self.hidden_size),
+                                         device=next(self.model.parameters()).device
+                                         )
+                             )
+        self.register_buffer("inv_covariance",
+                             torch.zeros((self.hidden_size, self.hidden_size),
+                                         device=next(self.model.parameters()).device
+                                         )
+                             )
+
+        # booleans associated with LLPR
+        self.per_atom = per_atom
+        self.covariance_computed = False
+        self.inv_covariance_computed = False
+
+    def forward(
+        self,
+        data: Dict[str, torch.Tensor],
+        training: bool = False,
+        compute_force: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+        compute_displacement: bool = False,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        # Setup
+        data["node_attrs"].requires_grad_(True)
+        data["positions"].requires_grad_(True)
+        num_graphs = data["ptr"].numel() - 1
+        displacement = torch.zeros(
+            (num_graphs, 3, 3),
+            dtype=data["positions"].dtype,
+            device=data["positions"].device,
+        )
+        if compute_virials or compute_stress or compute_displacement:
+            (
+                data["positions"],
+                data["shifts"],
+                displacement,
+            ) = get_symmetric_displacement(
+                positions=data["positions"],
+                unit_shifts=data["unit_shifts"],
+                cell=data["cell"],
+                edge_index=data["edge_index"],
+                num_graphs=num_graphs,
+                batch=data["batch"],
+            )
+
+        # Atomic energies
+        node_e0 = self.atomic_energies_fn(data["node_attrs"])
+        e0 = scatter_sum(
+            src=node_e0, index=data["batch"], dim=-1, dim_size=num_graphs
+        )  # [n_graphs,]
+
+        # Embeddings
+        node_feats = self.node_embedding(data["node_attrs"])
+        vectors, lengths = get_edge_vectors_and_lengths(
+            positions=data["positions"],
+            edge_index=data["edge_index"],
+            shifts=data["shifts"],
+        )
+        edge_attrs = self.spherical_harmonics(vectors)
+        edge_feats = self.radial_embedding(lengths)
+
+        # Interactions
+        energies = [e0]
+        node_energies_list = [node_e0]
+        ll_feats_list = []
+        for interaction, product, readout in zip(
+            self.interactions, self.products, self.readouts
+        ):
+            node_feats, sc = interaction(
+                node_attrs=data["node_attrs"],
+                node_feats=node_feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                edge_index=data["edge_index"],
+            )
+            node_feats = product(
+                node_feats=node_feats,
+                sc=sc,
+                node_attrs=data["node_attrs"],
+            )
+
+            # modified last layer feature pooling for LLPR
+            if readout is LinearReadoutBlock:
+                ll_feats_list.append(node_feats)
+                node_energies = readout(node_feats).squeeze(-1)  # [n_nodes, ]
+            elif readout is NonLinearReadoutBlock:
+                node_energies, feat_vec_after_MLP = readout(node_feats)
+                ll_feats_list.append(feat_vec_after_MLP)
+                node_energies = node_energies.squeeze(-1)  # [n_nodes, ]
+            else:
+                raise TypeError("Unknown readout for LLPR!")
+
+            energy = scatter_sum(
+                src=node_energies, index=data["batch"], dim=-1, dim_size=num_graphs
+            )  # [n_graphs,]
+            energies.append(energy)
+            node_energies_list.append(node_energies)
+
+        # Concatenate node features
+        ll_feats_out = torch.cat(ll_feats_list, dim=-1)
+        # Make features per atom if called
+        if self.per_atom:
+            # TODO: check if num_atoms is read correctly
+            num_atoms = data["ptr"][1:] - data["ptr"][:-1]
+            # TODO: check if division is broadcasted correctly
+            ll_feats_out = torch.div(ll_feats_out, num_atoms)
+
+        # Sum over energy contributions
+        contributions = torch.stack(energies, dim=-1)
+        total_energy = torch.sum(contributions, dim=-1)  # [n_graphs, ]
+        node_energy_contributions = torch.stack(node_energies_list, dim=-1)
+        node_energy = torch.sum(node_energy_contributions, dim=-1)  # [n_nodes, ]
+
+        # Outputs
+        forces, virials, stress = get_outputs(
+            energy=total_energy,
+            positions=data["positions"],
+            displacement=displacement,
+            cell=data["cell"],
+            training=training,
+            compute_force=compute_force,
+            compute_virials=compute_virials,
+            compute_stress=compute_stress,
+        )
+
+        # return uncertainty if inv_covariance matrix is available
+        if self.inv_covariance_computed:
+            uncertainty = torch.einsum("ij, jk, ik -> i",
+                                       ll_feats_out,
+                                       self.inv_covariance,
+                                       ll_feats_out
+                                       )
+            uncertainty = uncertainty.unsqueeze(1)
+        else:
+            uncertainty = None
+
+        return {
+            "energy": total_energy,
+            "node_energy": node_energy,
+            "contributions": contributions,
+            "forces": forces,
+            "virials": virials,
+            "stress": stress,
+            "displacement": displacement,
+            "ll_feats": ll_feats_out,
+            "uncertainty": uncertainty,
+        }
+
+    def compute_covariance(
+            self,
+            train_loader: DataLoader,
+            output_args
+    ) -> None:
+        # Utility function to compute the covariance matrix for a training set.
+        with torch.no_grad():
+            for batch in train_loader:
+                batch_dict = batch.to_dict()
+                output = self.model(
+                    batch_dict,
+                    compute_force=output_args["forces"],
+                    compute_virials=output_args["virials"],
+                    compute_stress=output_args["stress"],
+                )
+                ll_feats = output["ll_feats"]
+                self.covariance += ll_feats.T @ ll_feats
+        self.covariance_computed = True
+
+    def compute_inv_covariance(self, C, sigma):
+        # Utility function to set the hyperparameters of the uncertainty model.
+        if not self.covariance_computed:
+            raise RuntimeError("You must compute the covariance matrix before "
+                               "computing the inverse covariance matrix!")
+        C = float(C)
+        sigma = float(sigma)
+        self.inv_covariance = C * torch.linalg.inv(
+            self.covariance + sigma**2 * torch.eye(self.hidden_size, device=self.covariance.device)
+            )
+        self.inv_covariance_computed = True
 
 
 @compile_mode("script")
