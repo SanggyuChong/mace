@@ -75,7 +75,7 @@ class NonLinearReadoutBlockLLPR(torch.nn.Module):
         self.non_linearity = orig_block.non_linearity
         self.linear_2 = orig_block.linear_2
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.non_linearity(self.linear_1(x))
         return self.linear_2(x), x
 
