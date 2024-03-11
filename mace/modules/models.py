@@ -270,30 +270,51 @@ class MACE(torch.nn.Module):
         }
 
 
+def readout_is_linear(obj: Any):
+    if torch.jit.is_scripting():
+        return isinstance(obj, LinearReadoutBlock)
+    else:
+        # pre-compile TorchScript code
+        if isinstance(obj, torch.jit.RecursiveScriptModule):
+            return obj.original_name == "LinearReadoutBlock"
+
+        return isinstance(obj, LinearReadoutBlock)
+
+
+def readout_is_nonlinear(obj: Any):
+    if torch.jit.is_scripting():
+        return isinstance(obj, NonLinearReadoutBlock)
+    else:
+        # pre-compile TorchScript code
+        if isinstance(obj, torch.jit.RecursiveScriptModule):
+            return obj.original_name == "NonLinearReadoutBlock"
+
+        return isinstance(obj, NonLinearReadoutBlock)
+
+
 @compile_mode("script")
-class LLPredRigidityMACE(MACE):
+class LLPredRigidityMACE(torch.nn.Module):
     def __init__(
             self,
             model: MACE,
             ll_feat_format: str = "avg_per_atom",
-            **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__()
 
         # deepcopy the original model
         self.orig_model = copy.deepcopy(model)
 
         # determine ll_feat size from readout layers
         self.hidden_size = 0
-        for readout in self.orig_model.readouts:
-            if readout.original_name == "LinearReadoutBlock":
+        for readout in self.orig_model.readouts.children():
+            if readout_is_linear(readout):
                 self.hidden_size += o3.Irreps(readout.linear.irreps_in).dim
-            elif readout.original_name == "NonLinearReadoutBlock":
+            elif readout_is_nonlinear(readout):
                 # wrap modified nonlinear readout block to extract true ll_feat
                 self.mod_readout = NonLinearReadoutBlockLLPR(readout)
                 self.hidden_size += o3.Irreps(readout.linear_2.irreps_in).dim
             else:
-                raise TypeError("Unknown readout for LLPR!")
+                raise TypeError("Unknown readout block type for LLPR at initialization!")
 
         # initialize (inv_)covariance matrices
         self.register_buffer("covariance",
@@ -366,7 +387,9 @@ class LLPredRigidityMACE(MACE):
         node_energies_list = [node_e0]
         ll_feats_list = []
         for interaction, product, readout in zip(
-            self.orig_model.interactions, self.orig_model.products, self.orig_model.readouts
+            self.orig_model.interactions.children(),
+            self.orig_model.products.children(),
+            self.orig_model.readouts.children(),
         ):
             node_feats, sc = interaction(
                 node_attrs=data["node_attrs"],
@@ -381,16 +404,21 @@ class LLPredRigidityMACE(MACE):
                 node_attrs=data["node_attrs"],
             )
 
-            # modified last layer feature pooling for LLPR
-            if readout.original_name == "LinearReadoutBlock":
+            # Modified last layer feature pooling for LLPR
+            # NOTE: ad-hoc solution of checking the readout block type due to issues
+            # during inference after jit compiling
+            # 1 layer readout is assumed to be LinearReadoutBlock
+            if len(readout.children()) == 1:
                 ll_feats_list.append(node_feats)
                 node_energies = readout(node_feats).squeeze(-1)  # [n_nodes, ]
-            elif readout.original_name == "NonLinearReadoutBlock":
+            # 3 layer readout is assumed to be NonLinearReadoutBlock
+            elif len(readout.children()) == 3:
                 node_energies, feat_vec_after_MLP = self.mod_readout(node_feats)
                 ll_feats_list.append(feat_vec_after_MLP)
                 node_energies = node_energies.squeeze(-1)  # [n_nodes, ]
+            # throw error when the number of layers does not match above cases
             else:
-                raise TypeError("Unknown readout for LLPR!")
+                raise TypeError("Unknown readout block type for LLPR at inference!")
 
             energy = scatter_sum(
                 src=node_energies, index=data["batch"], dim=-1, dim_size=num_graphs
