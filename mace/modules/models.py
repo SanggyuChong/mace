@@ -297,26 +297,31 @@ class LLPredRigidityMACE(torch.nn.Module):
         self.orig_model = copy.deepcopy(model)
 
         # determine ll_feat size from readout layers
-        self.hidden_size = 0
+        self.hidden_sizes = []
+        self.hidden_size_sum = 0
         for readout in self.orig_model.readouts.children():
             if readout_is_linear(readout):
-                self.hidden_size += o3.Irreps(readout.linear.irreps_in).dim
+                cur_size = o3.Irreps(readout.linear.irreps_in)[0].dim
+                self.hidden_sizes.append(cur_size)
+                self.hidden_size_sum += cur_size
             elif readout_is_nonlinear(readout):
                 # wrap modified nonlinear readout block to extract true ll_feat
-                # assume only one nonlinear readout (according to MACE architecture)
+                # assume only one nonlinear readout in entire MACE architecture
                 self.mod_readout = NonLinearReadoutBlockLLPR(readout)
-                self.hidden_size += o3.Irreps(readout.linear_2.irreps_in).dim
+                cur_size = o3.Irreps(readout.linear_2.irreps_in).dim
+                self.hidden_sizes.append(cur_size)
+                self.hidden_size_sum += cur_size
             else:
                 raise TypeError("Unknown readout block type for LLPR at initialization!")
 
         # initialize (inv_)covariance matrices
         self.register_buffer("covariance",
-                             torch.zeros((self.hidden_size, self.hidden_size),
+                             torch.zeros((self.hidden_size_sum, self.hidden_size_sum),
                                          device=next(self.orig_model.parameters()).device
                                          )
                              )
         self.register_buffer("inv_covariance",
-                             torch.zeros((self.hidden_size, self.hidden_size),
+                             torch.zeros((self.hidden_size_sum, self.hidden_size_sum),
                                          device=next(self.orig_model.parameters()).device
                                          )
                              )
@@ -379,10 +384,11 @@ class LLPredRigidityMACE(torch.nn.Module):
         energies = [e0]
         node_energies_list = [node_e0]
         ll_feats_list = []
-        for interaction, product, readout in zip(
+        for i, (interaction, product, readout) in enumerate(zip(
             self.orig_model.interactions.children(),
             self.orig_model.products.children(),
             self.orig_model.readouts.children(),
+            )
         ):
             node_feats, sc = interaction(
                 node_attrs=data["node_attrs"],
@@ -397,29 +403,32 @@ class LLPredRigidityMACE(torch.nn.Module):
                 node_attrs=data["node_attrs"],
             )
 
+            hidden_size = self.hidden_sizes[i]
             # Modified last layer feature pooling for LLPR ----
             # NOTE: ad-hoc solution of checking the readout block type due to
             # to mangling. 1-layer readout is assumed to be LinearReadoutBlock,
             # 3-layer readout is assumed to be NonLinearReadoutBlock
             if torch.jit.is_scripting():
                 if len(readout.children()) == 1:
-                    ll_feats_list.append(node_feats)
+                    node_feats_inv = node_feats[:, :hidden_size]
+                    ll_feats_list.append(node_feats_inv)
                     node_energies = readout(node_feats).squeeze(-1)  # [n_nodes, ]
                 # 3 layer readout is assumed to be NonLinearReadoutBlock
                 elif len(readout.children()) == 3:
-                    node_energies, feat_vec_after_MLP = self.mod_readout(node_feats)
-                    ll_feats_list.append(feat_vec_after_MLP)
+                    node_energies, node_feats_after_MLP = self.mod_readout(node_feats)
+                    ll_feats_list.append(node_feats_after_MLP[:, :hidden_size])
                     node_energies = node_energies.squeeze(-1)  # [n_nodes, ]
                 # throw error when the number of layers does not match above cases
                 else:
                     raise TypeError("Unknown readout block type for LLPR at inference!")
             else:
                 if readout_is_linear(readout):
-                    ll_feats_list.append(node_feats)
+                    node_feats_inv = node_feats[:, :hidden_size]
+                    ll_feats_list.append(node_feats_inv)
                     node_energies = readout(node_feats).squeeze(-1)  # [n_nodes, ]
                 elif readout_is_nonlinear(readout):
                     node_energies, node_feats_after_MLP = self.mod_readout(node_feats)
-                    ll_feats_list.append(node_feats_after_MLP)
+                    ll_feats_list.append(node_feats_after_MLP[:, :hidden_size])
                     node_energies = node_energies.squeeze(-1)  # [n_nodes, ]
                 else:
                     raise TypeError("Unknown readout block type for LLPR at inference!")
@@ -506,7 +515,7 @@ class LLPredRigidityMACE(torch.nn.Module):
             raise RuntimeError("You must compute the covariance matrix before "
                                "computing the inverse covariance matrix!")
         self.inv_covariance = C * torch.linalg.inv(
-            self.covariance + sigma**2 * torch.eye(self.hidden_size, device=self.covariance.device)
+            self.covariance + sigma**2 * torch.eye(self.hidden_size_sum, device=self.covariance.device)
             )
         self.inv_covariance_computed = True
 
@@ -647,26 +656,31 @@ class LLPRScaleShiftMACE(torch.nn.Module):
         self.orig_model = copy.deepcopy(model)
 
         # determine ll_feat size from readout layers
-        self.hidden_size = 0
+        self.hidden_sizes = []
+        self.hidden_size_sum = 0
         for readout in self.orig_model.readouts.children():
             if readout_is_linear(readout):
-                self.hidden_size += o3.Irreps(readout.linear.irreps_in).dim
+                cur_size = o3.Irreps(readout.linear.irreps_in)[0].dim
+                self.hidden_sizes.append(cur_size)
+                self.hidden_size_sum += cur_size
             elif readout_is_nonlinear(readout):
                 # wrap modified nonlinear readout block to extract true ll_feat
-                # assume only one nonlinear readout (according to MACE architecture)
+                # assume only one nonlinear readout in entire MACE architecture
                 self.mod_readout = NonLinearReadoutBlockLLPR(readout)
-                self.hidden_size += o3.Irreps(readout.linear_2.irreps_in).dim
+                cur_size = o3.Irreps(readout.linear_2.irreps_in).dim
+                self.hidden_sizes.append(cur_size)
+                self.hidden_size_sum += cur_size
             else:
                 raise TypeError("Unknown readout block type for LLPR at initialization!")
 
         # initialize (inv_)covariance matrices
         self.register_buffer("covariance",
-                             torch.zeros((self.hidden_size, self.hidden_size),
+                             torch.zeros((self.hidden_size_sum, self.hidden_size_sum),
                                          device=next(self.orig_model.parameters()).device
                                          )
                              )
         self.register_buffer("inv_covariance",
-                             torch.zeros((self.hidden_size, self.hidden_size),
+                             torch.zeros((self.hidden_size_sum, self.hidden_size_sum),
                                          device=next(self.orig_model.parameters()).device
                                          )
                              )
@@ -728,8 +742,11 @@ class LLPRScaleShiftMACE(torch.nn.Module):
         # Interactions
         node_es_list = []
         ll_feats_list = []
-        for interaction, product, readout in zip(
-            self.interactions, self.products, self.readouts
+        for i, (interaction, product, readout) in enumerate(zip(
+            self.orig_model.interactions.children(),
+            self.orig_model.products.children(),
+            self.orig_model.readouts.children(),
+            )
         ):
             node_feats, sc = interaction(
                 node_attrs=data["node_attrs"],
@@ -743,26 +760,29 @@ class LLPRScaleShiftMACE(torch.nn.Module):
             )
             node_es_list.append(readout(node_feats).squeeze(-1))  # {[n_nodes, ], }
 
+            hidden_size = self.hidden_sizes[i]
             # Modified last layer feature pooling for LLPR ----
             # NOTE: ad-hoc solution of checking the readout block type due to
             # to mangling. 1-layer readout is assumed to be LinearReadoutBlock,
             # 3-layer readout is assumed to be NonLinearReadoutBlock
             if torch.jit.is_scripting():
                 if len(readout.children()) == 1:
-                    ll_feats_list.append(node_feats)
+                    node_feats_inv = node_feats[:, :hidden_size]
+                    ll_feats_list.append(node_feats_inv)
                 # 3 layer readout is assumed to be NonLinearReadoutBlock
                 elif len(readout.children()) == 3:
                     _, feat_vec_after_MLP = self.mod_readout(node_feats)
-                    ll_feats_list.append(feat_vec_after_MLP)
+                    ll_feats_list.append(feat_vec_after_MLP[:, :hidden_size])
                 # throw error when the number of layers does not match above cases
                 else:
                     raise TypeError("Unknown readout block type for LLPR at inference!")
             else:
                 if readout_is_linear(readout):
-                    ll_feats_list.append(node_feats)
+                    node_feats_inv = node_feats[:, :hidden_size]
+                    ll_feats_list.append(node_feats_inv)
                 elif readout_is_nonlinear(readout):
                     _, node_feats_after_MLP = self.mod_readout(node_feats)
-                    ll_feats_list.append(node_feats_after_MLP)
+                    ll_feats_list.append(node_feats_after_MLP[:, :hidden_size])
                 else:
                     raise TypeError("Unknown readout block type for LLPR at inference!")
 
@@ -852,7 +872,7 @@ class LLPRScaleShiftMACE(torch.nn.Module):
             raise RuntimeError("You must compute the covariance matrix before "
                                "computing the inverse covariance matrix!")
         self.inv_covariance = C * torch.linalg.inv(
-            self.covariance + sigma**2 * torch.eye(self.hidden_size, device=self.covariance.device)
+            self.covariance + sigma**2 * torch.eye(self.hidden_size_sum, device=self.covariance.device)
             )
         self.inv_covariance_computed = True
 
