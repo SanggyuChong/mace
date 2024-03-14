@@ -20,6 +20,9 @@ from .blocks import (
     ResidualElementDependentInteractionBlock,
     ScaleShiftBlock,
 )
+from .llpr import (
+    calibrate_llpr_params,
+)
 from .loss import (
     DipoleSingleLoss,
     WeightedEnergyForcesDipoleLoss,
@@ -101,4 +104,5 @@ __all__ = [
     "compute_mean_std_atomic_inter_energy",
     "compute_avg_num_neighbors",
     "compute_fixed_charge_dipole",
+    "calibrate_llpr_params",
 ]

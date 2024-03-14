@@ -271,24 +271,16 @@ class MACE(torch.nn.Module):
 
 
 def readout_is_linear(obj: Any):
-    if torch.jit.is_scripting():
-        return isinstance(obj, LinearReadoutBlock)
+    if isinstance(obj, torch.jit.RecursiveScriptModule):
+        return obj.original_name == "LinearReadoutBlock"
     else:
-        # pre-compile TorchScript code
-        if isinstance(obj, torch.jit.RecursiveScriptModule):
-            return obj.original_name == "LinearReadoutBlock"
-
         return isinstance(obj, LinearReadoutBlock)
 
 
 def readout_is_nonlinear(obj: Any):
-    if torch.jit.is_scripting():
-        return isinstance(obj, NonLinearReadoutBlock)
+    if isinstance(obj, torch.jit.RecursiveScriptModule):
+        return obj.original_name == "NonLinearReadoutBlock"
     else:
-        # pre-compile TorchScript code
-        if isinstance(obj, torch.jit.RecursiveScriptModule):
-            return obj.original_name == "NonLinearReadoutBlock"
-
         return isinstance(obj, NonLinearReadoutBlock)
 
 
@@ -297,7 +289,7 @@ class LLPredRigidityMACE(torch.nn.Module):
     def __init__(
             self,
             model: MACE,
-            ll_feat_format: str = "avg_per_atom",
+            ll_feat_format: str = "avg",
     ):
         super().__init__()
 
@@ -328,7 +320,7 @@ class LLPredRigidityMACE(torch.nn.Module):
                                          )
                              )
 
-        # booleans associated with LLPR
+        # extra params associated with LLPR
         self.ll_feat_format = ll_feat_format
         self.covariance_computed = False
         self.inv_covariance_computed = False
@@ -404,21 +396,32 @@ class LLPredRigidityMACE(torch.nn.Module):
                 node_attrs=data["node_attrs"],
             )
 
-            # Modified last layer feature pooling for LLPR
-            # NOTE: ad-hoc solution of checking the readout block type due to issues
-            # during inference after jit compiling
-            # 1 layer readout is assumed to be LinearReadoutBlock
-            if len(readout.children()) == 1:
-                ll_feats_list.append(node_feats)
-                node_energies = readout(node_feats).squeeze(-1)  # [n_nodes, ]
-            # 3 layer readout is assumed to be NonLinearReadoutBlock
-            elif len(readout.children()) == 3:
-                node_energies, feat_vec_after_MLP = self.mod_readout(node_feats)
-                ll_feats_list.append(feat_vec_after_MLP)
-                node_energies = node_energies.squeeze(-1)  # [n_nodes, ]
-            # throw error when the number of layers does not match above cases
+            # Modified last layer feature pooling for LLPR ----
+            # NOTE: ad-hoc solution of checking the readout block type due to
+            # to mangling. 1-layer readout is assumed to be LinearReadoutBlock,
+            # 3-layer readout is assumed to be NonLinearReadoutBlock
+            if torch.jit.is_scripting():
+                if len(readout.children()) == 1:
+                    ll_feats_list.append(node_feats)
+                    node_energies = readout(node_feats).squeeze(-1)  # [n_nodes, ]
+                # 3 layer readout is assumed to be NonLinearReadoutBlock
+                elif len(readout.children()) == 3:
+                    node_energies, feat_vec_after_MLP = self.mod_readout(node_feats)
+                    ll_feats_list.append(feat_vec_after_MLP)
+                    node_energies = node_energies.squeeze(-1)  # [n_nodes, ]
+                # throw error when the number of layers does not match above cases
+                else:
+                    raise TypeError("Unknown readout block type for LLPR at inference!")
             else:
-                raise TypeError("Unknown readout block type for LLPR at inference!")
+                if readout_is_linear(readout):
+                    ll_feats_list.append(node_feats)
+                    node_energies = readout(node_feats).squeeze(-1)  # [n_nodes, ]
+                elif readout_is_nonlinear(readout):
+                    node_energies, feat_vec_after_MLP = self.mod_readout(node_feats)
+                    ll_feats_list.append(feat_vec_after_MLP)
+                    node_energies = node_energies.squeeze(-1)  # [n_nodes, ]
+                else:
+                    raise TypeError("Unknown readout block type for LLPR at inference!")
 
             energy = scatter_sum(
                 src=node_energies, index=data["batch"], dim=-1, dim_size=num_graphs
@@ -428,19 +431,19 @@ class LLPredRigidityMACE(torch.nn.Module):
 
         # Concatenate node features
         ll_feats_cat = torch.cat(ll_feats_list, dim=-1)
-        if self.ll_feat_format == "avg_over_atom":
+        if self.ll_feat_format == "avg":
             ll_feats_agg = scatter_sum(
                 src=ll_feats_cat, index=data["batch"], dim=0, dim_size=num_graphs
             )
             ll_feats_out = torch.div(ll_feats_agg, num_atoms.unsqueeze(-1))
 
-        elif self.ll_feat_format == "sum_over_atom":
+        elif self.ll_feat_format == "sum":
             ll_feats_agg = scatter_sum(
                 src=ll_feats_cat, index=data["batch"], dim=0, dim_size=num_graphs
             )
             ll_feats_out = ll_feats_agg
 
-        elif self.ll_feat_format == "keep_all_atom":
+        elif self.ll_feat_format == "raw":
             ll_feats_out = ll_feats_cat
 
         else:
