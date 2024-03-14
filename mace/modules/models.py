@@ -503,6 +503,7 @@ class LLPredRigidityMACE(torch.nn.Module):
     def compute_covariance(self, train_loader: DataLoader) -> None:
         # Utility function to compute the covariance matrix for a training set.
         for batch in train_loader:
+            batch.to(self.covariance.device)
             batch_dict = batch.to_dict()
             output = self.forward(batch_dict)
             ll_feats = output["ll_feats"]
@@ -860,6 +861,7 @@ class LLPRScaleShiftMACE(torch.nn.Module):
     def compute_covariance(self, train_loader: DataLoader) -> None:
         # Utility function to compute the covariance matrix for a training set.
         for batch in train_loader:
+            batch.to(self.covariance.device)
             batch_dict = batch.to_dict()
             output = self.forward(batch_dict)
             ll_feats = output["ll_feats"]

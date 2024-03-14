@@ -49,6 +49,7 @@ def _avg_nll_regression(model, dataloader, energy_shift=0.0, energy_scale=1.0):
     total_nll = 0.0
     total_datapoints = 0
     for batch in dataloader:
+        batch = batch.to(next(model.parameters()).device)
         batch_dict = batch.to_dict()
         y = batch_dict['energy']  # * energy_scale + energy_shift
         model_outputs = model(batch_dict)
@@ -69,6 +70,7 @@ def _sum_squared_log(model, dataloader, n_samples_per_bin=10):
     actual_errors = []
     predicted_errors = []
     for batch in dataloader:
+        batch = batch.to(batch.to(next(model.parameters()).device))
         batch_dict = batch.to_dict()
         y = batch_dict['energy']
         model_outputs = model(batch_dict)
