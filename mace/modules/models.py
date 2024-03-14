@@ -810,7 +810,7 @@ class LLPRScaleShiftMACE(torch.nn.Module):
         node_inter_es = torch.sum(
             torch.stack(node_es_list, dim=0), dim=0
         )  # [n_nodes, ]
-        node_inter_es = self.scale_shift(node_inter_es)
+        node_inter_es = self.orig_model.scale_shift(node_inter_es)
 
         # Sum over nodes in graph
         inter_e = scatter_sum(
