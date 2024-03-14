@@ -26,7 +26,7 @@ def calibrate_llpr_params(model, validation_loader, function="ssl", **kwargs):
         if math.isnan(obj_function_value):
             obj_function_value = 1e10
         return obj_function_value
-    result = brute(obj_function_wrapper, ranges=[slice(-5, 5, 0.25), slice(-5, 5, 0.25)])
+    result = brute(obj_function_wrapper, ranges=[slice(-5, 5, 0.5), slice(-5, 5, 0.5)])
 
     # warn if we hit the edge of the parameter space
     if result[0] == -5 or result[0] == 5 or result[1] == -5 or result[1] == 5:
@@ -62,7 +62,7 @@ def _avg_nll_regression(model, dataloader, energy_shift=0.0, energy_scale=1.0):
     return total_nll / total_datapoints
 
 
-def _sum_squared_log(model, dataloader, n_samples_per_bin=1):
+def _sum_squared_log(model, dataloader, n_samples_per_bin=10):
     # This function calculates the sum of squared log errors on the energy for a dataset
     # Original author: F. Bigi (@frostedoyster) <https://github.com/frostedoyster/llpr>
 
