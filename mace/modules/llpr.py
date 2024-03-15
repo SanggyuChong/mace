@@ -15,22 +15,46 @@ def calibrate_llpr_params(model, validation_loader, function="ssl", **kwargs):
     else:
         raise RuntimeError("Unsupported objective function type for LLPR uncertainty calibration!")
 
+    actual_errors = []
+    ll_feats = []
+    # Compute model predictions, actual errors, ll feats
+    for batch in validation_loader:
+        batch = batch.to(next(model.parameters()).device)
+        batch_dict = batch.to_dict()
+        y = batch_dict['energy']
+        model_outputs = model(batch_dict)
+        predictions = model_outputs['energy']
+        ll_feats.append(model_outputs['ll_feats'])
+        actual_errors.append((y - predictions)**2)
+
+    actual_errors = torch.cat(actual_errors, dim=-1)
+    ll_feats_all = torch.cat(ll_feats, dim=-1)
+
     def obj_function_wrapper(x):
         x = _process_inputs(x)
         try:
+            print(model.inv_covariance)
             model.compute_inv_covariance(*x)
-            obj_function_value = obj_function(model, validation_loader, **kwargs)
+            print(model.inv_covariance)
+            predicted_errors = torch.einsum(
+                "ij, jk, ik -> i",
+                ll_feats_all,
+                model.inv_covariance,
+                ll_feats_all
+            )
+            obj_value = obj_function(actual_errors, predicted_errors, **kwargs)
         except torch._C._LinAlgError:
-            obj_function_value = 1e10
+            obj_value = 1e10
         # HACK:
-        if math.isnan(obj_function_value):
-            obj_function_value = 1e10
-        return obj_function_value
-    result = brute(obj_function_wrapper, ranges=[slice(-5, 5, 0.5), slice(-5, 5, 0.5)])
+        if math.isnan(obj_value):
+            obj_value = 1e10
+        return obj_value
+
+    result = brute(obj_function_wrapper, ranges=[slice(-5.0, 5.01, 0.1), slice(-5.0, 5.01, 0.1)])
 
     # warn if we hit the edge of the parameter space
-    if result[0] == -5 or result[0] == 5 or result[1] == -5 or result[1] == 5:
-        raise Warning("Optimal parameters are found at the edge of the parameter space")
+    if result[0] <= -5 or result[0] >= 5 or result[1] <= -5 or result[1] >= 5:
+        raise Warning("Optimal parameters found beyond the designated parameter space!")
 
     print(f"Calibrated LLPR parameters:\tC = {10**result[0]:.4E}\tsigma = {10**result[1]:.4E}")
     model.compute_inv_covariance(*(_process_inputs(result)))
@@ -42,48 +66,21 @@ def _process_inputs(x):
     return x
 
 
-def _avg_nll_regression(model, dataloader, energy_shift=0.0, energy_scale=1.0):
+def _avg_nll_regression(actual_errors, predicted_errors, energy_shift=0.0, energy_scale=1.0):
     # This function calculates the negative log-likelihood on the energy for a dataset
     # Original author: F. Bigi (@frostedoyster) <https://github.com/frostedoyster/llpr>
-
-    total_nll = 0.0
-    total_datapoints = 0
-    for batch in dataloader:
-        batch = batch.to(next(model.parameters()).device)
-        batch_dict = batch.to_dict()
-        y = batch_dict['energy']  # * energy_scale + energy_shift
-        model_outputs = model(batch_dict)
-        predictions = model_outputs['energy']  # * energy_scale + energy_shift
-        estimated_variances = model_outputs['uncertainty']  # * energy_scale**2
-        total_datapoints += len(y)
-        total_nll += (
-            (y-predictions)**2 / estimated_variances + torch.log(estimated_variances) + np.log(2*np.pi)
+    total_nll = (
+        actual_errors / predicted_errors + torch.log(actual_errors) + np.log(2*np.pi)
         ).sum().item() * 0.5
+    return total_nll / len(actual_errors)
 
-    return total_nll / total_datapoints
 
-
-def _sum_squared_log(model, dataloader, n_samples_per_bin=10):
+def _sum_squared_log(actual_errors, predicted_errors, n_samples_per_bin=10):
     # This function calculates the sum of squared log errors on the energy for a dataset
     # Original author: F. Bigi (@frostedoyster) <https://github.com/frostedoyster/llpr>
-
-    actual_errors = []
-    predicted_errors = []
-    for batch in dataloader:
-        batch = batch.to(batch.to(next(model.parameters()).device))
-        batch_dict = batch.to_dict()
-        y = batch_dict['energy']
-        model_outputs = model(batch_dict)
-        predictions = model_outputs['energy']
-        estimated_variances = model_outputs['uncertainty']
-        actual_errors.append((y-predictions)**2)
-        predicted_errors.append(estimated_variances)
-
-    actual_errors = torch.cat(actual_errors).flatten()
-    predicted_errors = torch.cat(predicted_errors).flatten()
     sort_indices = torch.argsort(predicted_errors)
-    actual_errors = actual_errors[sort_indices]
-    predicted_errors = predicted_errors[sort_indices]
+    actual_errors_sorted = actual_errors[sort_indices]
+    predicted_errors_sorted = predicted_errors[sort_indices]
 
     n_samples = len(actual_errors)
 
@@ -93,10 +90,10 @@ def _sum_squared_log(model, dataloader, n_samples_per_bin=10):
     # skip the last bin for incompleteness
     for i_bin in range(n_samples // n_samples_per_bin - 1):
         actual_error_bins.append(
-            actual_errors[i_bin*n_samples_per_bin:(i_bin+1)*n_samples_per_bin]
+            actual_errors_sorted[i_bin*n_samples_per_bin:(i_bin+1)*n_samples_per_bin]
         )
         predicted_error_bins.append(
-            predicted_errors[i_bin*n_samples_per_bin:(i_bin+1)*n_samples_per_bin]
+            predicted_errors_sorted[i_bin*n_samples_per_bin:(i_bin+1)*n_samples_per_bin]
         )
 
     actual_error_bins = torch.stack(actual_error_bins)
