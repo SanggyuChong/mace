@@ -27,15 +27,13 @@ def calibrate_llpr_params(model, validation_loader, function="ssl", **kwargs):
         ll_feats.append(model_outputs['ll_feats'])
         actual_errors.append((y - predictions)**2)
 
-    actual_errors = torch.cat(actual_errors, dim=-1)
-    ll_feats_all = torch.cat(ll_feats, dim=-1)
+    actual_errors = torch.cat(actual_errors, dim=0)
+    ll_feats_all = torch.cat(ll_feats, dim=0)
 
     def obj_function_wrapper(x):
         x = _process_inputs(x)
         try:
-            print(model.inv_covariance)
             model.compute_inv_covariance(*x)
-            print(model.inv_covariance)
             predicted_errors = torch.einsum(
                 "ij, jk, ik -> i",
                 ll_feats_all,
@@ -75,7 +73,7 @@ def _avg_nll_regression(actual_errors, predicted_errors, energy_shift=0.0, energ
     return total_nll / len(actual_errors)
 
 
-def _sum_squared_log(actual_errors, predicted_errors, n_samples_per_bin=10):
+def _sum_squared_log(actual_errors, predicted_errors, n_samples_per_bin=1):
     # This function calculates the sum of squared log errors on the energy for a dataset
     # Original author: F. Bigi (@frostedoyster) <https://github.com/frostedoyster/llpr>
     sort_indices = torch.argsort(predicted_errors)
