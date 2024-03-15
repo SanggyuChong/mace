@@ -4,7 +4,14 @@ from scipy.optimize import brute
 import math
 
 
-def calibrate_llpr_params(model, validation_loader, function="ssl", **kwargs):
+def calibrate_llpr_params(
+    model,
+    validation_loader,
+    function="ssl",
+    calib_bound=5,
+    calib_delta=0.1,
+    **kwargs,
+):
     # This function optimizes the calibration parameters for LLPR on the validation set
     # Original author: F. Bigi (@frostedoyster) <https://github.com/frostedoyster/llpr>
 
@@ -47,12 +54,12 @@ def calibrate_llpr_params(model, validation_loader, function="ssl", **kwargs):
         if math.isnan(obj_value):
             obj_value = 1e10
         return obj_value
-
-    result = brute(obj_function_wrapper, ranges=[slice(-5.0, 5.01, 0.1), slice(-5.0, 5.01, 0.1)])
+    calib_slice = slice(-1*calib_bound, calib_bound+0.01, calib_delta)
+    result = brute(obj_function_wrapper, ranges=[calib_slice, calib_slice])
 
     # warn if we hit the edge of the parameter space
     if result[0] <= -5 or result[0] >= 5 or result[1] <= -5 or result[1] >= 5:
-        raise Warning("Optimal parameters found beyond the designated parameter space!")
+        print("Optimal parameters found beyond the designated parameter space!")
 
     print(f"Calibrated LLPR parameters:\tC = {10**result[0]:.4E}\tsigma = {10**result[1]:.4E}")
     model.compute_inv_covariance(*(_process_inputs(result)))
