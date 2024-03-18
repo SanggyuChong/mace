@@ -30,8 +30,8 @@ def calibrate_llpr_params(
         batch_dict = batch.to_dict()
         y = batch_dict['energy']
         model_outputs = model(batch_dict)
-        predictions = model_outputs['energy']
-        ll_feats.append(model_outputs['ll_feats'])
+        predictions = model_outputs['energy'].detach()
+        ll_feats.append(model_outputs['ll_feats'].detach())
         actual_errors.append((y - predictions)**2)
 
     actual_errors = torch.cat(actual_errors, dim=0)

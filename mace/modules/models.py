@@ -864,8 +864,8 @@ class LLPRScaleShiftMACE(torch.nn.Module):
             batch.to(self.covariance.device)
             batch_dict = batch.to_dict()
             output = self.forward(batch_dict)
-            ll_feats = output["ll_feats"]
-            self.covariance += ll_feats.T @ ll_feats
+            ll_feats = output["ll_feats"].detach()
+            self.covariance = self.covariance + ll_feats.T @ ll_feats
         self.covariance_computed = True
 
     def compute_inv_covariance(self, C: float, sigma: float) -> None:
