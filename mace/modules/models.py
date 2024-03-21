@@ -480,9 +480,9 @@ class LLPredRigidityMACE(torch.nn.Module):
         # return uncertainty if inv_covariance matrix is available
         if self.inv_covariance_computed:
             uncertainty = torch.einsum("ij, jk, ik -> i",
-                                       ll_feats_out,
+                                       ll_feats_agg,
                                        self.inv_covariance,
-                                       ll_feats_out
+                                       ll_feats_agg
                                        )
             uncertainty = uncertainty.unsqueeze(1)
         else:
@@ -836,9 +836,9 @@ class LLPRScaleShiftMACE(torch.nn.Module):
         # return uncertainty if inv_covariance matrix is available
         if self.inv_covariance_computed:
             uncertainty = torch.einsum("ij, jk, ik -> i",
-                                       ll_feats_out,
+                                       ll_feats_agg,
                                        self.inv_covariance,
-                                       ll_feats_out
+                                       ll_feats_agg
                                        )
             uncertainty = uncertainty.unsqueeze(1)
         else:

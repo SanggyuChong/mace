@@ -24,11 +24,13 @@ def calibrate_llpr_params(
 
     actual_errors = []
     ll_feats = []
+    num_atoms = []
     # Compute model predictions, actual errors, ll feats
     for batch in validation_loader:
         batch = batch.to(next(model.parameters()).device)
         batch_dict = batch.to_dict()
         y = batch_dict['energy']
+        num_atoms.append(batch_dict['ptr'][1:] - batch_dict['ptr'][:-1])
         model_outputs = model(batch_dict)
         predictions = model_outputs['energy'].detach()
         ll_feats.append(model_outputs['ll_feats'].detach())
@@ -36,6 +38,11 @@ def calibrate_llpr_params(
 
     actual_errors = torch.cat(actual_errors, dim=0)
     ll_feats_all = torch.cat(ll_feats, dim=0)
+    num_atoms = torch.cat(num_atoms, dim=0)
+
+    # Enforce calibration on the extensive uncertainty of validation set
+    if model.ll_feat_format == "avg":
+        ll_feats_all = torch.mul(ll_feats_all, num_atoms)
 
     def obj_function_wrapper(x):
         x = _process_inputs(x)
