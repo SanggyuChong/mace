@@ -42,7 +42,7 @@ def calibrate_llpr_params(
 
     # Enforce calibration on the extensive uncertainty of validation set
     if model.ll_feat_format == "avg":
-        ll_feats_all = torch.mul(ll_feats_all, num_atoms)
+        ll_feats_all = torch.mul(ll_feats_all, num_atoms.unsqueeze(-1))
 
     def obj_function_wrapper(x):
         x = _process_inputs(x)
