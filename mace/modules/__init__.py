@@ -50,6 +50,7 @@ from .utils import (
     compute_mean_rms_energy_forces,
     compute_mean_std_atomic_inter_energy,
     compute_rms_dipoles,
+    compute_ll_feat_gradients,
 )
 
 interaction_classes: Dict[str, Type[InteractionBlock]] = {
@@ -109,4 +110,5 @@ __all__ = [
     "compute_avg_num_neighbors",
     "compute_fixed_charge_dipole",
     "calibrate_llpr_params",
+    "compute_ll_feat_gradients",
 ]

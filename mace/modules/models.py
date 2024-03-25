@@ -33,6 +33,7 @@ from .utils import (
     get_edge_vectors_and_lengths,
     get_outputs,
     get_symmetric_displacement,
+    compute_ll_feat_gradients,
 )
 
 import copy
@@ -329,6 +330,7 @@ class LLPredRigidityMACE(torch.nn.Module):
         # extra params associated with LLPR
         self.ll_feat_format = ll_feat_format
         self.covariance_computed = False
+        self.covariance_gradients_computed = False
         self.inv_covariance_computed = False
 
     def forward(
@@ -441,17 +443,15 @@ class LLPredRigidityMACE(torch.nn.Module):
 
         # Aggregate node features
         ll_feats_cat = torch.cat(ll_feats_list, dim=-1)
-        if self.ll_feat_format == "avg":
-            ll_feats_agg = scatter_sum(
-                src=ll_feats_cat, index=data["batch"], dim=0, dim_size=num_graphs
-            )
-            ll_feats_out = torch.div(ll_feats_agg, num_atoms.unsqueeze(-1))
+        ll_feats_agg = scatter_sum(
+            src=ll_feats_cat, index=data["batch"], dim=0, dim_size=num_graphs
+        )
 
-        elif self.ll_feat_format == "sum":
-            ll_feats_agg = scatter_sum(
-                src=ll_feats_cat, index=data["batch"], dim=0, dim_size=num_graphs
-            )
+        if self.ll_feat_format == "sum":
             ll_feats_out = ll_feats_agg
+
+        elif self.ll_feat_format == "avg":
+            ll_feats_out = torch.div(ll_feats_agg, num_atoms.unsqueeze(-1))
 
         elif self.ll_feat_format == "raw":
             ll_feats_out = ll_feats_cat
@@ -507,8 +507,76 @@ class LLPredRigidityMACE(torch.nn.Module):
             batch_dict = batch.to_dict()
             output = self.forward(batch_dict)
             ll_feats = output["ll_feats"]
+            # Account for the weighting of structures and targets
+            cur_weights = torch.mul(batch.weight, batch.energy_weight)
+            ll_feats = torch.mul(ll_feats, cur_weights.unsqueeze(-1))
             self.covariance += ll_feats.T @ ll_feats
         self.covariance_computed = True
+
+    def add_gradients_to_covariance(
+        self,
+        train_loader: DataLoader,
+        training: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+    ) -> None:
+
+        if not self.covariance_computed:
+            # Enforce calculation of covariance with energy before considering gradients
+            raise RuntimeError("You must first compute the covariance matrix "
+                               "with energies before adding the feature "
+                               "gradients to the covariance matrix!")
+
+        if self.covariance_gradients_computed:
+            # Enforce calculation of covariance with energy before considering gradients
+            raise RuntimeError("You have already accounted for gradients in your "
+                               "covariance matrix. You are advised to reset the "
+                               "covariance and inverse covariance matrices before "
+                               "continuing!")
+
+        compute_displacement = compute_virials or compute_stress
+        for batch in train_loader:
+            batch.to(self.covariance.device)
+            batch_dict = batch.to_dict()
+            output = self.forward(batch_dict,
+                                  training=training,
+                                  compute_displacement=compute_displacement,
+                                  compute_force=True,
+                                  compute_virials=compute_virials,
+                                  compute_stress=compute_stress,
+                                  )
+            ll_feats = output["ll_feats"]
+
+            f_grads, v_grads, s_grads = compute_ll_feat_gradients(
+                ll_feats=ll_feats,
+                displacement=output["displacement"],
+                batch_dict=batch_dict,
+                training=training,
+                compute_virials=compute_virials,
+                compute_stress=compute_stress,
+            )
+
+            # Account for the weighting of structures and targets
+            f_conf_weights = torch.stack([batch.weight[ii] for ii in batch.batch])
+            f_forces_weights = torch.stack([batch.forces_weight[ii] for ii in batch.batch])
+            cur_f_weights = torch.mul(f_conf_weights, f_forces_weights)
+            f_grads = torch.mul(f_grads, cur_f_weights.view(-1, 1, 1))
+            f_grads = f_grads.reshape(-1, ll_feats.shape[-1])
+            self.covariance += f_grads.T @ f_grads
+
+            if compute_virials:
+                cur_v_weights = torch.mul(batch.weight, batch.virials_weight)
+                v_grads = torch.mul(v_grads, cur_v_weights.view(-1, 1, 1, 1))
+                v_grads = v_grads.reshape(-1, ll_feats.shape[-1])                
+                self.covariance += v_grads.T @ v_grads
+
+            if compute_stress:
+                cur_s_weights = torch.mul(batch.weight, batch.stress_weight)
+                s_grads = torch.mul(s_grads, cur_s_weights.view(-1, 1, 1, 1))
+                s_grads = s_grads.reshape(-1, ll_feats.shape[-1])
+                self.covariance += s_grads.T @ s_grads
+
+        self.covariance_gradients_computed = True
 
     def compute_inv_covariance(self, C: float, sigma: float) -> None:
         # Utility function to set the hyperparameters of the uncertainty model.
@@ -519,6 +587,14 @@ class LLPredRigidityMACE(torch.nn.Module):
             self.covariance + sigma**2 * torch.eye(self.hidden_size_sum, device=self.covariance.device)
             )
         self.inv_covariance_computed = True
+
+    def reset_matrices(self) -> None:
+        # Utility function to reset covariance and inv covariance matrices.
+        self.covariance = torch.zeros(self.covariance.shape, device=self.covariance.device)
+        self.inv_covariance = torch.zeros(self.covariance.shape, device=self.covariance.device)
+        self.covariance_computed = False
+        self.inv_covariance_computed = False
+        self.covariance_gradients_computed = False
 
 
 @compile_mode("script")
@@ -689,6 +765,7 @@ class LLPRScaleShiftMACE(torch.nn.Module):
         # extra params associated with LLPR
         self.ll_feat_format = ll_feat_format
         self.covariance_computed = False
+        self.covariance_gradients_computed = False
         self.inv_covariance_computed = False
 
     def forward(
@@ -789,17 +866,15 @@ class LLPRScaleShiftMACE(torch.nn.Module):
 
         # Aggregate node features
         ll_feats_cat = torch.cat(ll_feats_list, dim=-1)
-        if self.ll_feat_format == "avg":
-            ll_feats_agg = scatter_sum(
-                src=ll_feats_cat, index=data["batch"], dim=0, dim_size=num_graphs
-            )
-            ll_feats_out = torch.div(ll_feats_agg, num_atoms.unsqueeze(-1))
+        ll_feats_agg = scatter_sum(
+            src=ll_feats_cat, index=data["batch"], dim=0, dim_size=num_graphs
+        )
 
-        elif self.ll_feat_format == "sum":
-            ll_feats_agg = scatter_sum(
-                src=ll_feats_cat, index=data["batch"], dim=0, dim_size=num_graphs
-            )
+        if self.ll_feat_format == "sum":
             ll_feats_out = ll_feats_agg
+
+        elif self.ll_feat_format == "avg":
+            ll_feats_out = torch.div(ll_feats_agg, num_atoms.unsqueeze(-1))
 
         elif self.ll_feat_format == "raw":
             ll_feats_out = ll_feats_cat
@@ -865,8 +940,77 @@ class LLPRScaleShiftMACE(torch.nn.Module):
             batch_dict = batch.to_dict()
             output = self.forward(batch_dict)
             ll_feats = output["ll_feats"].detach()
-            self.covariance = self.covariance + ll_feats.T @ ll_feats
+            # Account for the weighting of structures and targets
+            cur_weights = torch.mul(batch.weight, batch.energy_weight)
+            ll_feats = torch.mul(ll_feats, cur_weights.unsqueeze(-1))
+            self.covariance += ll_feats.T @ ll_feats
         self.covariance_computed = True
+
+    def add_gradients_to_covariance(
+        self,
+        train_loader: DataLoader,
+        training: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+    ) -> None:
+
+        if not self.covariance_computed:
+            # Enforce calculation of covariance with energy before considering gradients
+            raise RuntimeError("You must first compute the covariance matrix "
+                               "with energies before adding the feature "
+                               "gradients to the covariance matrix!")
+
+        if self.covariance_gradients_computed:
+            # Enforce calculation of covariance with energy before considering gradients
+            raise RuntimeError("You have already accounted for gradients in your "
+                               "covariance matrix. You are advised to reset the "
+                               "covariance and inverse covariance matrices before "
+                               "continuing!")
+
+        compute_displacement = compute_virials or compute_stress
+
+        for batch in train_loader:
+            batch.to(self.covariance.device)
+            batch_dict = batch.to_dict()
+            output = self.forward(batch_dict,
+                                  training=training,
+                                  compute_displacement=compute_displacement,
+                                  compute_force=True,
+                                  compute_virials=compute_virials,
+                                  compute_stress=compute_stress,
+                                  )
+            ll_feats = output["ll_feats"]
+
+            f_grads, v_grads, s_grads = compute_ll_feat_gradients(
+                ll_feats=ll_feats,
+                displacement=output["displacement"],
+                batch_dict=batch_dict,
+                training=training,
+                compute_virials=compute_virials,
+                compute_stress=compute_stress,
+            )
+
+            # Account for the weighting of structures and targets
+            f_conf_weights = torch.stack([batch.weight[ii] for ii in batch.batch])
+            f_forces_weights = torch.stack([batch.forces_weight[ii] for ii in batch.batch])
+            cur_f_weights = torch.mul(f_conf_weights, f_forces_weights)
+            f_grads = torch.mul(f_grads, cur_f_weights.view(-1, 1, 1))
+            f_grads = f_grads.reshape(-1, ll_feats.shape[-1])
+            self.covariance += f_grads.T @ f_grads
+
+            if compute_virials:
+                cur_v_weights = torch.mul(batch.weight, batch.virials_weight)
+                v_grads = torch.mul(v_grads, cur_v_weights.view(-1, 1, 1, 1))
+                v_grads = v_grads.reshape(-1, ll_feats.shape[-1])                
+                self.covariance += v_grads.T @ v_grads
+
+            if compute_stress:
+                cur_s_weights = torch.mul(batch.weight, batch.stress_weight)
+                s_grads = torch.mul(s_grads, cur_s_weights.view(-1, 1, 1, 1))
+                s_grads = s_grads.reshape(-1, ll_feats.shape[-1])
+                self.covariance += s_grads.T @ s_grads
+
+        self.covariance_gradients_computed = True
 
     def compute_inv_covariance(self, C: float, sigma: float) -> None:
         # Utility function to set the hyperparameters of the uncertainty model.
@@ -877,6 +1021,14 @@ class LLPRScaleShiftMACE(torch.nn.Module):
             self.covariance + sigma**2 * torch.eye(self.hidden_size_sum, device=self.covariance.device)
             )
         self.inv_covariance_computed = True
+
+    def reset_matrices(self) -> None:
+        # Utility function to reset covariance and inv covariance matrices.
+        self.covariance = torch.zeros(self.covariance.shape, device=self.covariance.device)
+        self.inv_covariance = torch.zeros(self.covariance.shape, device=self.covariance.device)
+        self.covariance_computed = False
+        self.inv_covariance_computed = False
+        self.covariance_gradients_computed = False
 
 
 class BOTNet(torch.nn.Module):

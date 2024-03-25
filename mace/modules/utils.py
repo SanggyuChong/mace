@@ -5,7 +5,7 @@
 ###########################################################################################
 
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -70,6 +70,71 @@ def compute_forces_virials(
         virials = torch.zeros((1, 3, 3))
 
     return -1 * forces, -1 * virials, stress
+
+
+def compute_ll_feat_gradients(
+    ll_feats: torch.Tensor,
+    displacement: torch.Tensor,
+    batch_dict: Dict[str, torch.Tensor],
+    training: bool = True,
+    compute_virials: bool = False,
+    compute_stress: bool = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+
+    grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(ll_feats[:, 0])]
+    positions = batch_dict["positions"]
+
+    if (compute_virials or compute_stress):
+        cell = batch_dict["cell"]
+        # We assume force is always given
+        f_grads = []
+        v_grads = []
+        s_grads = []
+        for i in range(ll_feats.shape[-1]):
+            cur_grad_f, cur_grad_v = torch.autograd.grad(
+                [ll_feats[:, i]],
+                [positions, displacement],
+                grad_outputs=grad_outputs,
+                retain_graph=training,
+                create_graph=training,
+                allow_unused=True,
+            )
+            f_grads.append(cur_grad_f)
+            v_grads.append(cur_grad_v)
+        f_grads = torch.stack(f_grads)
+        f_grads = f_grads.permute(1, 2, 0)  # [num_atoms_batch, 3, num_ll_feats]
+        v_grads = torch.stack(v_grads)
+        v_grads = v_grads.permute(1, 2, 3, 0)  # [num_batch, 3, 3, num_ll_feats]
+
+        if v_grads is None:
+            v_grads = torch.zeros((1, 3, 3, ll_feats.shape[1]))
+        if compute_stress:
+            cell = cell.view(-1, 3, 3)
+            volume = torch.einsum(
+                "zi,zi->z",
+                cell[:, 0, :],
+                torch.cross(cell[:, 1, :], cell[:, 2, :], dim=1),
+            ).unsqueeze(-1)
+            s_grads = v_grads / volume.view(-1, 1, 1, 1)
+
+    else:
+        f_grads = []
+        for i in range(ll_feats.shape[-1]):
+            cur_grad_f = torch.autograd.grad(
+                [ll_feats[:, i]],
+                [positions],
+                grad_outputs=grad_outputs,
+                retain_graph=training,
+                create_graph=training,
+                allow_unused=True,
+            )[0]
+            f_grads.append(cur_grad_f)
+        f_grads = torch.stack(f_grads)
+        f_grads = f_grads.permute(1, 2, 0)
+        v_grads = None
+        s_grads = None
+
+    return -1 * f_grads, -1 * v_grads, s_grads
 
 
 def get_symmetric_displacement(
