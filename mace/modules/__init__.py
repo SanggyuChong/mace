@@ -25,6 +25,8 @@ from .llpr import (
 )
 from .loss import (
     DipoleSingleLoss,
+    EnergyForcesLoss,
+    UniversalLoss,
     WeightedEnergyForcesDipoleLoss,
     WeightedEnergyForcesLoss,
     WeightedEnergyForcesStressLoss,
@@ -51,6 +53,7 @@ from .utils import (
     compute_mean_std_atomic_inter_energy,
     compute_rms_dipoles,
     compute_ll_feat_gradients,
+    compute_statistics,
 )
 
 interaction_classes: Dict[str, Type[InteractionBlock]] = {
@@ -104,10 +107,12 @@ __all__ = [
     "DipoleSingleLoss",
     "WeightedEnergyForcesDipoleLoss",
     "WeightedHuberEnergyForcesStressLoss",
+    "UniversalLoss",
     "SymmetricContraction",
     "interaction_classes",
     "compute_mean_std_atomic_inter_energy",
     "compute_avg_num_neighbors",
+    "compute_statistics",
     "compute_fixed_charge_dipole",
     "calibrate_llpr_params",
     "compute_ll_feat_gradients",

@@ -8,21 +8,25 @@
 
 ## Table of contents
 
-- [About MACE](#about-mace)
-- [Documentation](#documentation)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [Training](#training)
-  - [Evaluation](#evaluation)
-- [Tutorial](#tutorial)
-- [Weights and Biases](#weights-and-biases-for-experiment-tracking)
-- [Development](#development)
-- [Pretrained foundation models](#pretrained-foundation-models)
-  - [MACE-MP: Materials Project Force Fields](#mace-mp-materials-project-force-fields)
-  - [MACE-OFF: Transferable Organic Force Fields](#mace-off-transferable-organic-force-fields)
-- [References](#references)
-- [Contact](#contact)
-- [License](#license)
+- [MACE](#mace)
+  - [Table of contents](#table-of-contents)
+  - [About MACE](#about-mace)
+  - [Documentation](#documentation)
+  - [Installation](#installation)
+    - [conda installation](#conda-installation)
+    - [pip installation](#pip-installation)
+  - [Usage](#usage)
+    - [Training](#training)
+    - [Evaluation](#evaluation)
+  - [Tutorial](#tutorial)
+  - [On-line data loading for large datasets](#on-line-data-loading-for-large-datasets)
+  - [Weights and Biases for experiment tracking](#weights-and-biases-for-experiment-tracking)
+  - [Development](#development)
+  - [Pretrained Universal MACE Checkpoints](#pretrained-universal-mace-checkpoints)
+    - [Materials Project](#materials-project)
+  - [References](#references)
+  - [Contact](#contact)
+  - [License](#license)
 
 ## About MACE
 
@@ -45,21 +49,9 @@ A partial documentation is available at: https://mace-docs.readthedocs.io
 Requirements:
 
 - Python >= 3.7
-- [PyTorch](https://pytorch.org/) >= 1.12 **(training with float64 is not supported with PyTorch 2.1)**.
+- [PyTorch](https://pytorch.org/) >= 1.12 (2.1 is not supported, 2.0 is recommended)
 
 (for openMM, use Python = 3.9)
-
-### pip installation
-
-To install via `pip`, follow the steps below:
-
-```sh
-pip install --upgrade pip
-pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
-pip install mace-torch
-```
-
-For CPU or MPS (Apple Silicon) installation, use `pip install torch torchvision torchaudio` instead.
 
 ### conda installation
 
@@ -91,7 +83,7 @@ python -m venv mace-venv
 source mace-venv/bin/activate
 
 # Install PyTorch (for example, for CUDA 11.6 [cu116])
-pip3 install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
+pip3 install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu116
 
 # Clone and install MACE (and all required packages)
 git clone https://github.com/ACEsuit/mace.git
@@ -130,7 +122,7 @@ mace_run_train \
 
 To give a specific validation set, use the argument `--valid_file`. To set a larger batch size for evaluating the validation set, specify `--valid_batch_size`.
 
-To control the model's size, you need to change `--hidden_irreps`. For most applications, the recommended default model size is `--hidden_irreps='256x0e'` (meaning 256 invariant messages) or `--hidden_irreps='128x0e + 128x1o'`. If the model is not accurate enough, you can include higher order features, e.g., `128x0e + 128x1o + 128x2e`, or increase the number of channels to `256`.
+To control the model's size, you need to change `--hidden_irreps`. For most applications, the recommended default model size is `--hidden_irreps='256x0e'` (meaning 256 invariant messages) or `--hidden_irreps='128x0e + 128x1o'`. If the model is not accurate enough, you can include higher order features, e.g., `128x0e + 128x1o + 128x2e`, or increase the number of channels to `256`.It is also possible to specify the model using the     `--num_channels=128` and `--max_L=1`keys. 
 
 It is usually preferred to add the isolated atoms to the training set, rather than reading in their energies through the command line like in the example above. To label them in the training set, set `config_type=IsolatedAtom` in their info fields. If you prefer not to use or do not know the energies of the isolated atoms, you can use the option `--E0s="average"` which estimates the atomic energies using least squares regression.
 
@@ -157,9 +149,53 @@ mace_eval_configs \
 
 ## Tutorial
 
-You can run our [Colab tutorial](https://colab.research.google.com/drive/1D6EtMUjQPey_GkuxUAbPgld6_9ibIa-V?authuser=1#scrollTo=Z10787RE1N8T) to quickly get started with MACE. 
+You can run our [Colab tutorial](https://colab.research.google.com/drive/1D6EtMUjQPey_GkuxUAbPgld6_9ibIa-V?authuser=1#scrollTo=Z10787RE1N8T) to quickly get started with MACE. We also have a more detailed user and developer tutorial at https://github.com/ilyes319/mace-tutorials 
 
-We also have a more detailed user and developer tutorial at https://github.com/ilyes319/mace-tutorials
+## On-line data loading for large datasets
+
+If you have a large dataset that might not fit into the GPU memory it is recommended to preprocess the data on a CPU and use on-line dataloading for training the model. To preprocess your dataset specified as an xyz file run the `preprocess_data.py` script. An example is given here:
+
+```sh
+mkdir processed_data
+python ./mace/scripts/preprocess_data.py \
+    --train_file="/path/to/train_large.xyz" \
+    --valid_fraction=0.05 \
+    --test_file="/path/to/test_large.xyz" \
+    --atomic_numbers="[1, 6, 7, 8, 9, 15, 16, 17, 35, 53]" \
+    --r_max=4.5 \
+    --h5_prefix="processed_data/" \
+    --compute_statistics \
+    --E0s="average" \
+    --seed=123 \
+```
+
+To see all options and a little description of them run `python ./mace/scripts/preprocess_data.py --help` . The script will create a number of HDF5 files in the `processed_data` folder which can be used for training. There wiull be one file for trainin, one for validation and a separate one for each `config_type` in the test set. To train the model use the `run_train.py` script as follows:
+
+```sh
+python ./mace/scripts/run_train.py \
+    --name="MACE_on_big_data" \
+    --num_workers=16 \
+    --train_file="./processed_data/train.h5" \
+    --valid_file="./processed_data/valid.h5" \
+    --test_dir="./processed_data" \
+    --statistics_file="./processed_data/statistics.json" \
+    --model="ScaleShiftMACE" \
+    --num_interactions=2 \
+    --num_channels=128 \
+    --max_L=1 \
+    --correlation=3 \
+    --batch_size=32 \
+    --valid_batch_size=32 \
+    --max_num_epochs=100 \
+    --swa \
+    --start_swa=60 \
+    --ema \
+    --ema_decay=0.99 \
+    --amsgrad \
+    --error_table='PerAtomMAE' \
+    --device=cuda \
+    --seed=123 \
+```
 
 ## Weights and Biases for experiment tracking
 
@@ -222,6 +258,12 @@ before you commit (and push) to avoid accidentally committing bad code.
 
 We are happy to accept pull requests under an [MIT license](https://choosealicense.com/licenses/mit/). Please copy/paste the license text as a comment into your pull request.
 
+## Pretrained Universal MACE Checkpoints
+
+### Materials Project 
+
+We have collaborated with the Materials Project (MP) who trained universal MACE checkpoints covering 89 elements on 1.6 M bulk crystals in the [MPTrj dataset](https://figshare.com/articles/dataset/23713842) selected from MP relaxation trajectories. These pretrained models were used for materials stability prediction in [Matbench Discovery](https://matbench-discovery.materialsproject.org) and the corresponding [preprint](https://arxiv.org/abs/2308.14920). For easy reuse, these checkpoints were published on [Hugging Face](https://huggingface.co/cyrusyc/mace-universal).
+
 ## References
 
 If you use this code, please cite our papers:
@@ -235,6 +277,7 @@ If you use this code, please cite our papers:
   year={2022},
   url={https://openreview.net/forum?id=YPpSngE-ZU}
 }
+
 
 @misc{Batatia2022Design,
   title = {The Design Space of E(3)-Equivariant Atom-Centered Interatomic Potentials},
