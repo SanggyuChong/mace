@@ -25,7 +25,6 @@ from .llpr import (
 )
 from .loss import (
     DipoleSingleLoss,
-    EnergyForcesLoss,
     UniversalLoss,
     WeightedEnergyForcesDipoleLoss,
     WeightedEnergyForcesLoss,

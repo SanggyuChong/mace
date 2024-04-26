@@ -31,6 +31,8 @@ from .utils import (
     compute_fixed_charge_dipole,
     compute_forces,
     get_edge_vectors_and_lengths,
+    get_huber_mask,
+    get_conditional_huber_force_mask,
     get_outputs,
     get_symmetric_displacement,
     compute_ll_feat_gradients,
@@ -513,6 +515,30 @@ class LLPredRigidityMACE(torch.nn.Module):
             self.covariance += ll_feats.T @ ll_feats
         self.covariance_computed = True
 
+    def compute_covariance_universal(
+        self,
+        train_loader: DataLoader,
+        huber_delta: float = 1.0
+    ) -> None:
+        # Utility function to compute the covariance matrix for a training set
+        # with modifications for the universal MACE model
+        for batch in train_loader:
+            batch.to(self.covariance.device)
+            batch_dict = batch.to_dict()
+            output = self.forward(batch_dict)
+            ll_feats = output["ll_feats"]
+            # Account for the weighting of structures and targets
+            cur_weights = torch.mul(batch.weight, batch.energy_weight)
+            huber_mask = get_huber_mask(
+                output["energy"],
+                batch["energy"],                
+                huber_delta,
+            )
+            cur_weights *= huber_mask
+            ll_feats = torch.mul(ll_feats, cur_weights.unsqueeze(-1))
+            self.covariance += ll_feats.T @ ll_feats
+        self.covariance_computed = True
+
     def add_gradients_to_covariance(
         self,
         train_loader: DataLoader,
@@ -520,19 +546,6 @@ class LLPredRigidityMACE(torch.nn.Module):
         compute_virials: bool = False,
         compute_stress: bool = False,
     ) -> None:
-
-        if not self.covariance_computed:
-            # Enforce calculation of covariance with energy before considering gradients
-            raise RuntimeError("You must first compute the covariance matrix "
-                               "with energies before adding the feature "
-                               "gradients to the covariance matrix!")
-
-        if self.covariance_gradients_computed:
-            # Enforce calculation of covariance with energy before considering gradients
-            raise RuntimeError("You have already accounted for gradients in your "
-                               "covariance matrix. You are advised to reset the "
-                               "covariance and inverse covariance matrices before "
-                               "continuing!")
 
         compute_displacement = compute_virials or compute_stress
         for batch in train_loader:
@@ -567,7 +580,7 @@ class LLPredRigidityMACE(torch.nn.Module):
             if compute_virials:
                 cur_v_weights = torch.mul(batch.weight, batch.virials_weight)
                 v_grads = torch.mul(v_grads, cur_v_weights.view(-1, 1, 1, 1))
-                v_grads = v_grads.reshape(-1, ll_feats.shape[-1])                
+                v_grads = v_grads.reshape(-1, ll_feats.shape[-1])
                 self.covariance += v_grads.T @ v_grads
 
             if compute_stress:
@@ -596,6 +609,76 @@ class LLPredRigidityMACE(torch.nn.Module):
         self.inv_covariance_computed = False
         self.covariance_gradients_computed = False
 
+    def add_gradients_to_covariance_universal(
+        self,
+        train_loader: DataLoader,
+        training: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+        huber_delta: float = 1.0,
+    ) -> None:
+
+        compute_displacement = compute_virials or compute_stress
+        for batch in train_loader:
+            batch.to(self.covariance.device)
+            batch_dict = batch.to_dict()
+            output = self.forward(batch_dict,
+                                  training=training,
+                                  compute_displacement=compute_displacement,
+                                  compute_force=True,
+                                  compute_virials=compute_virials,
+                                  compute_stress=compute_stress,
+                                  )
+            ll_feats = output["ll_feats"]
+
+            f_grads, v_grads, s_grads = compute_ll_feat_gradients(
+                ll_feats=ll_feats,
+                displacement=output["displacement"],
+                batch_dict=batch_dict,
+                training=training,
+                compute_virials=compute_virials,
+                compute_stress=compute_stress,
+            )
+
+            # Account for the weighting of structures and targets
+            f_conf_weights = torch.stack([batch.weight[ii] for ii in batch.batch])
+            f_forces_weights = torch.stack([batch.forces_weight[ii] for ii in batch.batch])
+            cur_f_weights = torch.mul(f_conf_weights, f_forces_weights)
+            huber_mask_force = get_conditional_huber_force_mask(
+                output["forces"],
+                batch["forces"],
+                huber_delta,
+            )
+            cur_f_weights *= huber_mask_force
+            f_grads = torch.mul(f_grads, cur_f_weights.view(-1, 1, 1))
+            f_grads = f_grads.reshape(-1, ll_feats.shape[-1])
+            self.covariance += f_grads.T @ f_grads
+
+            if compute_virials:
+                cur_v_weights = torch.mul(batch.weight, batch.virials_weight)
+                huber_mask_virials = get_conditional_huber_force_mask(
+                    output["virials"],
+                    batch["virials"],
+                    huber_delta,
+                )
+                cur_v_weights *= huber_mask_virials
+                v_grads = torch.mul(v_grads, cur_v_weights.view(-1, 1, 1, 1))
+                v_grads = v_grads.reshape(-1, ll_feats.shape[-1])
+                self.covariance += v_grads.T @ v_grads
+
+            if compute_stress:
+                cur_s_weights = torch.mul(batch.weight, batch.stress_weight)
+                huber_mask_stress = get_conditional_huber_force_mask(
+                    output["stress"],
+                    batch["stress"],
+                    huber_delta,
+                )
+                cur_s_weights += huber_mask_stress
+                s_grads = torch.mul(s_grads, cur_s_weights.view(-1, 1, 1, 1))
+                s_grads = s_grads.reshape(-1, ll_feats.shape[-1])
+                self.covariance += s_grads.T @ s_grads
+
+        self.covariance_gradients_computed = True
 
 @compile_mode("script")
 class ScaleShiftMACE(MACE):
@@ -946,6 +1029,30 @@ class LLPRScaleShiftMACE(torch.nn.Module):
             self.covariance += ll_feats.T @ ll_feats
         self.covariance_computed = True
 
+    def compute_covariance_universal(
+        self,
+        train_loader: DataLoader,
+        huber_delta: float = 1.0
+    ) -> None:
+        # Utility function to compute the covariance matrix for a training set
+        # with modifications for the universal MACE model
+        for batch in train_loader:
+            batch.to(self.covariance.device)
+            batch_dict = batch.to_dict()
+            output = self.forward(batch_dict)
+            ll_feats = output["ll_feats"]
+            # Account for the weighting of structures and targets
+            cur_weights = torch.mul(batch.weight, batch.energy_weight)
+            huber_mask = get_huber_mask(
+                output["energy"],
+                batch["energy"],                
+                huber_delta,
+            )
+            cur_weights *= huber_mask
+            ll_feats = torch.mul(ll_feats, cur_weights.unsqueeze(-1))
+            self.covariance += ll_feats.T @ ll_feats
+        self.covariance_computed = True
+
     def add_gradients_to_covariance(
         self,
         train_loader: DataLoader,
@@ -1006,6 +1113,77 @@ class LLPRScaleShiftMACE(torch.nn.Module):
 
             if compute_stress:
                 cur_s_weights = torch.mul(batch.weight, batch.stress_weight)
+                s_grads = torch.mul(s_grads, cur_s_weights.view(-1, 1, 1, 1))
+                s_grads = s_grads.reshape(-1, ll_feats.shape[-1])
+                self.covariance += s_grads.T @ s_grads
+
+        self.covariance_gradients_computed = True
+
+    def add_gradients_to_covariance_universal(
+        self,
+        train_loader: DataLoader,
+        training: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+        huber_delta: float = 1.0,
+    ) -> None:
+
+        compute_displacement = compute_virials or compute_stress
+        for batch in train_loader:
+            batch.to(self.covariance.device)
+            batch_dict = batch.to_dict()
+            output = self.forward(batch_dict,
+                                  training=training,
+                                  compute_displacement=compute_displacement,
+                                  compute_force=True,
+                                  compute_virials=compute_virials,
+                                  compute_stress=compute_stress,
+                                  )
+            ll_feats = output["ll_feats"]
+
+            f_grads, v_grads, s_grads = compute_ll_feat_gradients(
+                ll_feats=ll_feats,
+                displacement=output["displacement"],
+                batch_dict=batch_dict,
+                training=training,
+                compute_virials=compute_virials,
+                compute_stress=compute_stress,
+            )
+
+            # Account for the weighting of structures and targets
+            f_conf_weights = torch.stack([batch.weight[ii] for ii in batch.batch])
+            f_forces_weights = torch.stack([batch.forces_weight[ii] for ii in batch.batch])
+            cur_f_weights = torch.mul(f_conf_weights, f_forces_weights)
+            huber_mask_force = get_conditional_huber_force_mask(
+                output["forces"],
+                batch["forces"],
+                huber_delta,
+            )
+            cur_f_weights *= huber_mask_force
+            f_grads = torch.mul(f_grads, cur_f_weights.view(-1, 1, 1))
+            f_grads = f_grads.reshape(-1, ll_feats.shape[-1])
+            self.covariance += f_grads.T @ f_grads
+
+            if compute_virials:
+                cur_v_weights = torch.mul(batch.weight, batch.virials_weight)
+                huber_mask_virials = get_conditional_huber_force_mask(
+                    output["virials"],
+                    batch["virials"],
+                    huber_delta,
+                )
+                cur_v_weights *= huber_mask_virials
+                v_grads = torch.mul(v_grads, cur_v_weights.view(-1, 1, 1, 1))
+                v_grads = v_grads.reshape(-1, ll_feats.shape[-1])
+                self.covariance += v_grads.T @ v_grads
+
+            if compute_stress:
+                cur_s_weights = torch.mul(batch.weight, batch.stress_weight)
+                huber_mask_stress = get_conditional_huber_force_mask(
+                    output["stress"],
+                    batch["stress"],
+                    huber_delta,
+                )
+                cur_s_weights += huber_mask_stress
                 s_grads = torch.mul(s_grads, cur_s_weights.view(-1, 1, 1, 1))
                 s_grads = s_grads.reshape(-1, ll_feats.shape[-1])
                 self.covariance += s_grads.T @ s_grads
