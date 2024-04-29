@@ -135,7 +135,7 @@ def compute_ll_feat_gradients(
         v_grads = None
         s_grads = None
 
-    return -1 * f_grads, -1 * v_grads, s_grads
+    return f_grads, v_grads, s_grads
 
 
 def get_symmetric_displacement(
