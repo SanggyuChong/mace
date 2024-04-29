@@ -5,7 +5,7 @@
 ###########################################################################################
 
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -73,6 +73,71 @@ def compute_forces_virials(
     return -1 * forces, -1 * virials, stress
 
 
+def compute_ll_feat_gradients(
+    ll_feats: torch.Tensor,
+    displacement: torch.Tensor,
+    batch_dict: Dict[str, torch.Tensor],
+    training: bool = True,
+    compute_virials: bool = False,
+    compute_stress: bool = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+
+    grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(ll_feats[:, 0])]
+    positions = batch_dict["positions"]
+
+    if (compute_virials or compute_stress):
+        cell = batch_dict["cell"]
+        # We assume force is always given
+        f_grads = []
+        v_grads = []
+        s_grads = []
+        for i in range(ll_feats.shape[-1]):
+            cur_grad_f, cur_grad_v = torch.autograd.grad(
+                [ll_feats[:, i]],
+                [positions, displacement],
+                grad_outputs=grad_outputs,
+                retain_graph=training,
+                create_graph=training,
+                allow_unused=True,
+            )
+            f_grads.append(cur_grad_f)
+            v_grads.append(cur_grad_v)
+        f_grads = torch.stack(f_grads)
+        f_grads = f_grads.permute(1, 2, 0)  # [num_atoms_batch, 3, num_ll_feats]
+        v_grads = torch.stack(v_grads)
+        v_grads = v_grads.permute(1, 2, 3, 0)  # [num_batch, 3, 3, num_ll_feats]
+
+        if v_grads is None:
+            v_grads = torch.zeros((1, 3, 3, ll_feats.shape[1]))
+        if compute_stress:
+            cell = cell.view(-1, 3, 3)
+            volume = torch.einsum(
+                "zi,zi->z",
+                cell[:, 0, :],
+                torch.cross(cell[:, 1, :], cell[:, 2, :], dim=1),
+            ).unsqueeze(-1)
+            s_grads = v_grads / volume.view(-1, 1, 1, 1)
+
+    else:
+        f_grads = []
+        for i in range(ll_feats.shape[-1]):
+            cur_grad_f = torch.autograd.grad(
+                [ll_feats[:, i]],
+                [positions],
+                grad_outputs=grad_outputs,
+                retain_graph=training,
+                create_graph=training,
+                allow_unused=True,
+            )[0]
+            f_grads.append(cur_grad_f)
+        f_grads = torch.stack(f_grads)
+        f_grads = f_grads.permute(1, 2, 0)
+        v_grads = None
+        s_grads = None
+
+    return -1 * f_grads, -1 * v_grads, s_grads
+
+
 def get_symmetric_displacement(
     positions: torch.Tensor,
     unit_shifts: torch.Tensor,
@@ -109,6 +174,40 @@ def get_symmetric_displacement(
         cell[batch[sender]],
     )
     return positions, shifts, displacement
+
+
+def get_huber_mask(
+    input: torch.Tensor,
+    target: torch.Tensor,
+    huber_delta: float = 1.0,
+) -> torch.Tensor:
+    se = torch.square(input - target)
+    huber_mask = (se < huber_delta).int()
+    return huber_mask
+
+
+def get_conditional_huber_force_mask(
+    input: torch.Tensor,
+    target: torch.Tensor,
+    huber_delta: float,
+) -> torch.Tensor:
+    # Define the multiplication factors for each condition
+    factors = huber_delta * torch.tensor([1.0, 0.7, 0.4, 0.1])
+
+    # Apply multiplication factors based on conditions
+    c1 = torch.norm(target, dim=-1) < 100
+    c2 = (torch.norm(target, dim=-1) >= 100) & (torch.norm(target, dim=-1) < 200)
+    c3 = (torch.norm(target, dim=-1) >= 200) & (torch.norm(target, dim=-1) < 300)
+    c4 = ~(c1 | c2 | c3)
+
+    huber_mask = torch.zeros_like(input)
+
+    huber_mask[c1] = get_huber_mask(target[c1], input[c1], factors[0])
+    huber_mask[c2] = get_huber_mask(target[c2], input[c2], factors[1])
+    huber_mask[c3] = get_huber_mask(target[c3], input[c3], factors[2])
+    huber_mask[c4] = get_huber_mask(target[c4], input[c4], factors[3])
+
+    return huber_mask
 
 
 def get_outputs(
