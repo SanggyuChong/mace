@@ -65,22 +65,6 @@ class NonLinearReadoutBlock(torch.nn.Module):
 
 
 @compile_mode("script")
-class NonLinearReadoutBlockLLPR(torch.nn.Module):
-    def __init__(
-            self, orig_block: NonLinearReadoutBlock
-    ):
-        super().__init__()
-        self.hidden_irreps = orig_block.hidden_irreps
-        self.linear_1 = orig_block.linear_1
-        self.non_linearity = orig_block.non_linearity
-        self.linear_2 = orig_block.linear_2
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = self.non_linearity(self.linear_1(x))
-        return self.linear_2(x), x
-
-
-@compile_mode("script")
 class LinearDipoleReadoutBlock(torch.nn.Module):
     def __init__(self, irreps_in: o3.Irreps, dipole_only: bool = False):
         super().__init__()
