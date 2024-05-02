@@ -1095,18 +1095,6 @@ class LLPRModel(torch.nn.Module):
         self.covariance_gradients_computed = False
         self.inv_covariance_computed = False
 
-    def aggregate_features(self, ll_feats: torch.Tensor, indices: torch.Tensor, num_graphs: int, num_atoms: torch.Tensor) -> torch.Tensor:
-        ll_feats_list = torch.split(ll_feats, self.hidden_sizes_before_readout, dim=-1)
-        ll_feats_list = [(ll_feats if is_linear else readout.non_linearity(readout.linear_1(ll_feats)))[:, :size] for ll_feats, readout, size, is_linear in zip(ll_feats_list, self.orig_model.readouts.children(), self.hidden_sizes, self.readouts_are_linear)]
-
-        # Aggregate node features
-        ll_feats_cat = torch.cat(ll_feats_list, dim=-1)
-        ll_feats_agg = scatter_sum(
-            src=ll_feats_cat, index=indices, dim=0, dim_size=num_graphs
-        )
-
-        return ll_feats_agg
-
     def forward(
         self,
         data: Dict[str, torch.Tensor],
@@ -1183,6 +1171,24 @@ class LLPRModel(torch.nn.Module):
 
         return output
 
+    def aggregate_features(
+            self,
+            ll_feats: torch.Tensor,
+            indices: torch.Tensor,
+            num_graphs: int
+    ) -> torch.Tensor:
+        # Aggregates (sums) node features over each structure
+        ll_feats_list = torch.split(ll_feats, self.hidden_sizes_before_readout, dim=-1)
+        ll_feats_list = [(ll_feats if is_linear else readout.non_linearity(readout.linear_1(ll_feats)))[:, :size] for ll_feats, readout, size, is_linear in zip(ll_feats_list, self.orig_model.readouts.children(), self.hidden_sizes, self.readouts_are_linear)]
+
+        # Aggregate node features
+        ll_feats_cat = torch.cat(ll_feats_list, dim=-1)
+        ll_feats_agg = scatter_sum(
+            src=ll_feats_cat, index=indices, dim=0, dim_size=num_graphs
+        )
+
+        return ll_feats_agg
+
     def compute_covariance(
         self,
         train_loader: DataLoader,
@@ -1211,7 +1217,7 @@ class LLPRModel(torch.nn.Module):
 
             num_graphs = batch_dict["ptr"].numel() - 1
             num_atoms = batch_dict["ptr"][1:] - batch_dict["ptr"][:-1]
-            ll_feats = self.aggregate_features(output["node_feats"], batch_dict["batch"], num_graphs, num_atoms)
+            ll_feats = self.aggregate_features(output["node_feats"], batch_dict["batch"], num_graphs)
 
             if include_forces or include_virials or include_stresses:
                 f_grads, v_grads, s_grads = compute_ll_feat_gradients(
@@ -1237,7 +1243,7 @@ class LLPRModel(torch.nn.Module):
                 )
                 cur_weights *= huber_mask
             ll_feats = torch.mul(ll_feats, cur_weights.unsqueeze(-1)**(0.5))
-            self.covariance += ll_feats.T @ ll_feats
+            self.covariance += (ll_feats / num_atoms).T @ (ll_feats / num_atoms)
 
             if include_forces:
                 # Account for the weighting of structures and targets
