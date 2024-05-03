@@ -1192,6 +1192,7 @@ class LLPRModel(torch.nn.Module):
     def compute_covariance(
         self,
         train_loader: DataLoader,
+        include_energy: bool = True,
         include_forces: bool = False,
         include_virials: bool = False,
         include_stresses: bool = False,
@@ -1232,18 +1233,19 @@ class LLPRModel(torch.nn.Module):
                 f_grads, v_grads, s_grads = None, None, None
             ll_feats = ll_feats.detach()
 
-            # Account for the weighting of structures and targets
-            # Apply Huber loss mask if universal model
-            cur_weights = torch.mul(batch.weight, batch.energy_weight)
-            if is_universal:
-                huber_mask = get_huber_mask(
-                    output["energy"],
-                    batch["energy"],
-                    huber_delta,
-                )
-                cur_weights *= huber_mask
-            ll_feats = torch.mul(ll_feats, cur_weights.unsqueeze(-1)**(0.5))
-            self.covariance += (ll_feats / num_atoms).T @ (ll_feats / num_atoms)
+            if include_energy:
+                # Account for the weighting of structures and targets
+                # Apply Huber loss mask if universal model
+                cur_weights = torch.mul(batch.weight, batch.energy_weight)
+                if is_universal:
+                    huber_mask = get_huber_mask(
+                        output["energy"],
+                        batch["energy"],
+                        huber_delta,
+                    )
+                    cur_weights *= huber_mask
+                ll_feats = torch.mul(ll_feats, cur_weights.unsqueeze(-1)**(0.5))
+                self.covariance += (ll_feats / num_atoms.unsqueeze(-1)).T @ (ll_feats / num_atoms.unsqueeze(-1))
 
             if include_forces:
                 # Account for the weighting of structures and targets
