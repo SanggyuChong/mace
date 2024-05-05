@@ -1120,7 +1120,7 @@ class LLPRModel(torch.nn.Module):
         output = self.orig_model(
             data, (compute_force_uncertainty or compute_stress_uncertainty or compute_virial_uncertainty), compute_force, compute_virials, compute_stress, compute_displacement
         )
-        ll_feats = self.aggregate_features(output["node_feats"], data["batch"], num_graphs, num_atoms)
+        ll_feats = self.aggregate_features(output["node_feats"], data["batch"], num_graphs)
 
         energy_uncertainty = None
         force_uncertainty = None
