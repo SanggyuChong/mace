@@ -1106,6 +1106,7 @@ class LLPRModel(torch.nn.Module):
         compute_force_uncertainty: bool = False,
         compute_virial_uncertainty: bool = False,
         compute_stress_uncertainty: bool = False,
+        save_atomic_llfeats: bool = False,
     ) -> Dict[str, Optional[torch.Tensor]]:
         if compute_force_uncertainty and not compute_force:
             raise RuntimeError("Cannot compute force uncertainty without computing forces")
@@ -1116,12 +1117,18 @@ class LLPRModel(torch.nn.Module):
 
         num_graphs = data["ptr"].numel() - 1
         num_atoms = data["ptr"][1:] - data["ptr"][:-1]
-        
+
         output = self.orig_model(
             data, (compute_force_uncertainty or compute_stress_uncertainty or compute_virial_uncertainty), compute_force, compute_virials, compute_stress, compute_displacement
         )
         ll_feats = self.aggregate_features(output["node_feats"], data["batch"], num_graphs)
-
+        if save_atomic_llfeats:
+            output["atomic_llfeats"] = self.aggregate_features(
+                output["node_feats"],
+                data["batch"],
+                num_graphs,
+                save_atomic_llfeats=True,   
+            )
         energy_uncertainty = None
         force_uncertainty = None
         virial_uncertainty = None
@@ -1175,7 +1182,8 @@ class LLPRModel(torch.nn.Module):
             self,
             ll_feats: torch.Tensor,
             indices: torch.Tensor,
-            num_graphs: int
+            num_graphs: int,
+            save_atomic_llfeats: bool = False,
     ) -> torch.Tensor:
         # Aggregates (sums) node features over each structure
         ll_feats_list = torch.split(ll_feats, self.hidden_sizes_before_readout, dim=-1)
@@ -1183,11 +1191,14 @@ class LLPRModel(torch.nn.Module):
 
         # Aggregate node features
         ll_feats_cat = torch.cat(ll_feats_list, dim=-1)
-        ll_feats_agg = scatter_sum(
-            src=ll_feats_cat, index=indices, dim=0, dim_size=num_graphs
-        )
+        if save_atomic_llfeats:
+            return ll_feats_cat
 
-        return ll_feats_agg
+        else:
+            ll_feats_agg = scatter_sum(
+                src=ll_feats_cat, index=indices, dim=0, dim_size=num_graphs
+            )
+            return ll_feats_agg
 
     def compute_covariance(
         self,
