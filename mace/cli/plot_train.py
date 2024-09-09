@@ -170,15 +170,19 @@ def get_paths(path: str) -> List[str]:
     return paths
 
 
-def main():
+def main() -> None:
     args = parse_args()
+    run(args)
+
+
+def run(args: argparse.Namespace) -> None:
     data = pd.DataFrame(
         results
         for path in get_paths(args.path)
         for results in parse_training_results(path)
     )
 
-    for name, group in data.groupby(["name"]):
+    for name, group in data.groupby("name"):
         plot(group, min_epoch=args.min_epoch, output_path=f"{name}.pdf")
 
 

@@ -5,6 +5,7 @@
 ###########################################################################################
 
 import logging
+from contextlib import contextmanager
 from typing import Dict
 
 import numpy as np
@@ -51,6 +52,9 @@ def to_numpy(t: torch.Tensor) -> np.ndarray:
 def init_device(device_str: str) -> torch.device:
     if "cuda" in device_str:
         assert torch.cuda.is_available(), "No CUDA device available!"
+        if ":" in device_str:
+            # Check if the desired device is available
+            assert int(device_str.split(":")[-1]) < torch.cuda.device_count()
         logging.info(
             f"CUDA version: {torch.version.cuda}, CUDA device: {torch.cuda.current_device()}"
         )
@@ -60,6 +64,9 @@ def init_device(device_str: str) -> torch.device:
         assert torch.backends.mps.is_available(), "No MPS backend is available!"
         logging.info("Using MPS GPU acceleration")
         return torch.device("mps")
+    if device_str == "xpu":
+        torch.xpu.is_available()
+        return torch.device("xpu")
 
     logging.info("Using CPU")
     return torch.device("cpu")
@@ -70,17 +77,6 @@ dtype_dict = {"float32": torch.float32, "float64": torch.float64}
 
 def set_default_dtype(dtype: str) -> None:
     torch.set_default_dtype(dtype_dict[dtype])
-
-
-def get_complex_default_dtype():
-    default_dtype = torch.get_default_dtype()
-    if default_dtype == torch.float64:
-        return torch.complex128
-
-    if default_dtype == torch.float32:
-        return torch.complex64
-
-    raise NotImplementedError
 
 
 def spherical_to_cartesian(t: torch.Tensor):
@@ -104,7 +100,7 @@ def cartesian_to_spherical(t: torch.Tensor):
 def voigt_to_matrix(t: torch.Tensor):
     """
     Convert voigt notation to matrix notation
-    :param t: (6,) tensor or (3, 3) tensor
+    :param t: (6,) tensor or (3, 3) tensor or (9,) tensor
     :return: (3, 3) tensor
     """
     if t.shape == (3, 3):
@@ -118,34 +114,28 @@ def voigt_to_matrix(t: torch.Tensor):
             ],
             dtype=t.dtype,
         )
+    if t.shape == (9,):
+        return t.view(3, 3)
 
     raise ValueError(
-        f"Stress tensor must be of shape (6,) or (3, 3), but has shape {t.shape}"
+        f"Stress tensor must be of shape (6,) or (3, 3), or (9,) but has shape {t.shape}"
     )
 
 
-def init_wandb(project: str, entity: str, name: str, config: dict):
+def init_wandb(project: str, entity: str, name: str, config: dict, directory: str):
     import wandb
 
-    wandb.init(project=project, entity=entity, name=name, config=config)
+    wandb.init(project=project, entity=entity, name=name, config=config, dir=directory)
 
 
-class DataParallelModel(torch.nn.Module):
-    def __init__(self, model):
-        super(DataParallelModel, self).__init__()
-        self.model = torch.nn.DataParallel(model).cuda()
+@contextmanager
+def default_dtype(dtype: torch.dtype):
+    """Context manager for configuring the default_dtype used by torch
 
-    def forward(self, batch, training, compute_force, compute_virials, compute_stress):
-        return self.model(
-            batch,
-            training=training,
-            compute_force=compute_force,
-            compute_virials=compute_virials,
-            compute_stress=compute_stress,
-        )
-
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.model.module, name)
+    Args:
+        dtype (torch.dtype): the default dtype to use within this context manager
+    """
+    init = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    yield
+    torch.set_default_dtype(init)

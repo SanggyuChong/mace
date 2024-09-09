@@ -17,10 +17,19 @@ build/
 .idea/
 .vscode/
 *.txt
+*.log
+
+# Distribution
+dist/
 
 # Jupyter Notebook
 .ipynb_checkpoints
 
 # DS_Store
 .DS_Store
-*.log
+*.models
+*.pt
+/wandb
+*.xyz
+/checkpoints
+*.model

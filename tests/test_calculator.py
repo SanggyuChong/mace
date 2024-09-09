@@ -6,11 +6,15 @@ from pathlib import Path
 import ase.io
 import numpy as np
 import pytest
+import torch
+from ase import build
 from ase.atoms import Atoms
 from ase.calculators.test import gradient_test
 from ase.constraints import ExpCellFilter
 
+from mace.calculators import mace_mp, mace_off
 from mace.calculators.mace import MACECalculator
+from mace.modules.models import ScaleShiftMACE
 
 pytest_mace_dir = Path(__file__).parent.parent
 run_train = Path(__file__).parent.parent / "mace" / "cli" / "run_train.py"
@@ -28,9 +32,9 @@ def fitting_configs_fixture():
         Atoms(numbers=[8], positions=[[0, 0, 0]], cell=[6] * 3),
         Atoms(numbers=[1], positions=[[0, 0, 0]], cell=[6] * 3),
     ]
-    fit_configs[0].info["REF_energy"] = 0.0
+    fit_configs[0].info["REF_energy"] = 1.0
     fit_configs[0].info["config_type"] = "IsolatedAtom"
-    fit_configs[1].info["REF_energy"] = 0.0
+    fit_configs[1].info["REF_energy"] = -0.5
     fit_configs[1].info["config_type"] = "IsolatedAtom"
 
     np.random.seed(5)
@@ -72,6 +76,7 @@ def trained_model_fixture(tmp_path_factory, fitting_configs):
         "energy_key": "REF_energy",
         "forces_key": "REF_forces",
         "stress_key": "REF_stress",
+        "eval_interval": 2,
     }
 
     tmp_path = tmp_path_factory.mktemp("run_")
@@ -134,6 +139,7 @@ def trained_model_equivariant_fixture(tmp_path_factory, fitting_configs):
         "energy_key": "REF_energy",
         "forces_key": "REF_forces",
         "stress_key": "REF_stress",
+        "eval_interval": 2,
     }
 
     tmp_path = tmp_path_factory.mktemp("run_")
@@ -197,6 +203,7 @@ def trained_dipole_fixture(tmp_path_factory, fitting_configs):
         "stress_key": "",
         "dipole_key": "REF_dipole",
         "error_table": "DipoleRMSE",
+        "eval_interval": 2,
     }
 
     tmp_path = tmp_path_factory.mktemp("run_")
@@ -262,6 +269,7 @@ def trained_energy_dipole_fixture(tmp_path_factory, fitting_configs):
         "stress_key": "",
         "dipole_key": "REF_dipole",
         "error_table": "EnergyDipoleRMSE",
+        "eval_interval": 2,
     }
 
     tmp_path = tmp_path_factory.mktemp("run_")
@@ -329,6 +337,7 @@ def trained_committee_fixture(tmp_path_factory, fitting_configs):
             "energy_key": "REF_energy",
             "forces_key": "REF_forces",
             "stress_key": "REF_stress",
+            "eval_interval": 2,
         }
 
         tmp_path = tmp_path_factory.mktemp(f"run{seed}_")
@@ -366,6 +375,22 @@ def trained_committee_fixture(tmp_path_factory, fitting_configs):
         _model_paths.append(tmp_path / f"MACE{seed}.model")
 
     return MACECalculator(_model_paths, device="cpu")
+
+
+def test_calculator_node_energy(fitting_configs, trained_model):
+    for at in fitting_configs:
+        trained_model.calculate(at)
+        node_energies = trained_model.results["node_energy"]
+        batch = trained_model._atoms_to_batch(at)  # pylint: disable=protected-access
+        node_heads = batch["head"][batch["batch"]]
+        num_atoms_arange = torch.arange(batch["positions"].shape[0])
+        node_e0 = (
+            trained_model.models[0].atomic_energies_fn(batch["node_attrs"]).detach()
+        )
+        node_e0 = node_e0[num_atoms_arange, node_heads].cpu().numpy()
+        energy_via_nodes = np.sum(node_energies + node_e0)
+        energy = trained_model.results["energy"]
+        np.testing.assert_allclose(energy, energy_via_nodes, atol=1e-6)
 
 
 def test_calculator_forces(fitting_configs, trained_model):
@@ -441,3 +466,29 @@ def test_calculator_descriptor(fitting_configs, trained_equivariant_model):
     assert desc_single_layer.shape[1] == 16
     assert desc.shape[0] == 3
     assert desc.shape[1] == 80
+
+
+def test_mace_mp(capsys: pytest.CaptureFixture):
+    mp_mace = mace_mp()
+    assert isinstance(mp_mace, MACECalculator)
+    assert mp_mace.model_type == "MACE"
+    assert len(mp_mace.models) == 1
+    assert isinstance(mp_mace.models[0], ScaleShiftMACE)
+
+    _, stderr = capsys.readouterr()
+    assert stderr == ""
+
+
+def test_mace_off():
+    mace_off_model = mace_off(model="small", device="cpu")
+    assert isinstance(mace_off_model, MACECalculator)
+    assert mace_off_model.model_type == "MACE"
+    assert len(mace_off_model.models) == 1
+    assert isinstance(mace_off_model.models[0], ScaleShiftMACE)
+
+    atoms = build.molecule("H2O")
+    atoms.calc = mace_off_model
+
+    E = atoms.get_potential_energy()
+
+    assert np.allclose(E, -2081.116128586803, atol=1e-9)
