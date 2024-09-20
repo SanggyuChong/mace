@@ -30,19 +30,19 @@ def calibrate_llpr_params(
         batch = batch.to(next(model.parameters()).device)
         batch_dict = batch.to_dict()
         y = batch_dict['energy']
+        num_graphs = batch_dict["ptr"].numel() - 1
         num_atoms.append(batch_dict['ptr'][1:] - batch_dict['ptr'][:-1])
         model_outputs = model(batch_dict)
         predictions = model_outputs['energy'].detach()
-        ll_feats.append(model_outputs['ll_feats'].detach())
+        cur_ll_feats = model.aggregate_ll_features(
+            model_outputs["node_feats"], batch_dict["batch"], num_graphs
+        ).detach()
+        ll_feats.append(cur_ll_feats)
         actual_errors.append((y - predictions)**2)
 
     actual_errors = torch.cat(actual_errors, dim=0)
     ll_feats_all = torch.cat(ll_feats, dim=0)
     num_atoms = torch.cat(num_atoms, dim=0)
-
-    # Enforce calibration on the extensive uncertainty of validation set
-    if model.ll_feat_format == "avg":
-        ll_feats_all = torch.mul(ll_feats_all, num_atoms.unsqueeze(-1))
 
     def obj_function_wrapper(x):
         x = _process_inputs(x)
@@ -57,7 +57,6 @@ def calibrate_llpr_params(
             obj_value = obj_function(actual_errors, predicted_errors, **kwargs)
         except torch._C._LinAlgError:
             obj_value = 1e10
-        # HACK:
         if math.isnan(obj_value):
             obj_value = 1e10
         return obj_value

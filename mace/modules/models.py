@@ -1197,12 +1197,11 @@ class LLPRModel(torch.nn.Module):
             raise RuntimeError("Cannot compute stress uncertainty without computing stress")
 
         num_graphs = data["ptr"].numel() - 1
-        num_atoms = data["ptr"][1:] - data["ptr"][:-1]
-        
+
         output = self.orig_model(
             data, (compute_force_uncertainty or compute_stress_uncertainty or compute_virial_uncertainty), compute_force, compute_virials, compute_stress, compute_displacement
         )
-        ll_feats = self.aggregate_features(output["node_feats"], data["batch"], num_graphs)
+        ll_feats = self.aggregate_ll_features(output["node_feats"], data["batch"], num_graphs)
 
         energy_uncertainty = None
         force_uncertainty = None
@@ -1253,7 +1252,7 @@ class LLPRModel(torch.nn.Module):
 
         return output
 
-    def aggregate_features(
+    def aggregate_ll_features(
             self,
             ll_feats: torch.Tensor,
             indices: torch.Tensor,
@@ -1282,14 +1281,8 @@ class LLPRModel(torch.nn.Module):
         huber_delta: float = 0.01,
     ) -> None:
         # Utility function to compute the covariance matrix for a training set.
-        # Note that this function computes the covariance step-wise, so it can
-        # be used to accumulate multiple times on subsets of the same training set
 
-        if not is_universal:
-            raise NotImplementedError("Only universal loss models are supported for LLPR")
-
-        import tqdm
-        for batch in tqdm.tqdm(train_loader):
+        for batch in train_loader:
             batch.to(self.covariance.device)
             batch_dict = batch.to_dict()
             output = self.orig_model(
@@ -1303,7 +1296,7 @@ class LLPRModel(torch.nn.Module):
 
             num_graphs = batch_dict["ptr"].numel() - 1
             num_atoms = batch_dict["ptr"][1:] - batch_dict["ptr"][:-1]
-            ll_feats = self.aggregate_features(output["node_feats"], batch_dict["batch"], num_graphs)
+            ll_feats = self.aggregate_ll_features(output["node_feats"], batch_dict["batch"], num_graphs)
 
             if include_forces or include_virials or include_stresses:
                 f_grads, v_grads, s_grads = compute_ll_feat_gradients(
@@ -1328,7 +1321,7 @@ class LLPRModel(torch.nn.Module):
                         batch["energy"],
                         huber_delta,
                     )
-                    cur_weights *= huber_mask
+                    cur_weights = torch.mul(cur_weights, huber_mask)
                 ll_feats = torch.mul(ll_feats, cur_weights.unsqueeze(-1)**(0.5))
                 self.covariance += (ll_feats / num_atoms.unsqueeze(-1)).T @ (ll_feats / num_atoms.unsqueeze(-1))
 
@@ -1338,37 +1331,49 @@ class LLPRModel(torch.nn.Module):
                 f_conf_weights = torch.stack([batch.weight[ii] for ii in batch.batch])
                 f_forces_weights = torch.stack([batch.forces_weight[ii] for ii in batch.batch])
                 cur_f_weights = torch.mul(f_conf_weights, f_forces_weights)
+                cur_f_weights = cur_f_weights.view(-1, 1).expand(-1, 3)
                 if is_universal:
                     huber_mask_force = get_conditional_huber_force_mask(
                         output["forces"],
                         batch["forces"],
                         huber_delta,
                     )
-                    cur_f_weights *= huber_mask_force
-                f_grads = torch.mul(f_grads, cur_f_weights.view(-1, 1, 1)**(0.5))
+                    cur_f_weights = torch.mul(cur_f_weights, huber_mask_force)
+                f_grads = torch.mul(f_grads, cur_f_weights.unsqueeze(-1)**(0.5))
                 f_grads = f_grads.reshape(-1, ll_feats.shape[-1])
                 self.covariance += f_grads.T @ f_grads
 
             if include_virials:
+                # No Huber mask in the case of virials as it was not used in the
+                # universal model                
                 cur_v_weights = torch.mul(batch.weight, batch.virials_weight)
-                v_grads = torch.mul(v_grads, cur_v_weights.view(-1, 1, 1, 1)**(0.5))
-                v_grads = v_grads.reshape(-1, ll_feats.shape[-1])    
+                cur_v_weights = cur_v_weights.view(-1, 1, 1).expand(-1, 3, 3)
+                v_grads = torch.mul(v_grads, cur_v_weights.unsqueeze(-1)**(0.5))
+                v_grads = v_grads.reshape(-1, ll_feats.shape[-1])
                 self.covariance += v_grads.T @ v_grads
 
             if include_stresses:
+                # Account for the weighting of structures and targets
+                # Apply Huber loss mask if universal model                
                 cur_s_weights = torch.mul(batch.weight, batch.stress_weight)
+                cur_s_weights = cur_s_weights.view(-1, 1, 1).expand(-1, 3, 3)
                 if is_universal:
                     huber_mask_stress = get_huber_mask(
                         output["stress"],
                         batch["stress"],
                         huber_delta,
                     )
-                    cur_s_weights *= huber_mask_stress
-                s_grads = torch.mul(s_grads, cur_s_weights.view(-1, 1, 1, 1)**(0.5))
-                # The stresses seem to be normalized by n_atoms in the normal loss, but
-                # not in the universal loss. Here, we don't normalize
+                    cur_s_weights = torch.mul(cur_s_weights, huber_mask_stress)
+                s_grads = torch.mul(s_grads, cur_s_weights.unsqueeze(-1)**(0.5))
                 s_grads = s_grads.reshape(-1, ll_feats.shape[-1])
-                self.covariance += s_grads.T @ s_grads
+                # The stresses seem to be normalized by n_atoms in the normal loss, but
+                # not in the universal loss.
+                if is_universal:
+                    self.covariance += s_grads.T @ s_grads
+                else:
+                    # repeat num_atoms for 9 elements of stress tensor
+                    self.covariance += (s_grads / num_atoms.repeat_interleave(9).unsqueeze(-1)).T \
+                        @ (s_grads / num_atoms.repeat_interleave(9).unsqueeze(-1))
 
         self.covariance_computed = True
 

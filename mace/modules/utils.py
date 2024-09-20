@@ -272,7 +272,7 @@ def get_huber_mask(
     huber_delta: float = 1.0,
 ) -> torch.Tensor:
     se = torch.square(input - target)
-    huber_mask = (se < huber_delta).int()
+    huber_mask = (se < huber_delta).int().double()
     return huber_mask
 
 
