@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -7,7 +8,6 @@ import ase.io
 import numpy as np
 import pytest
 from ase.atoms import Atoms
-import json
 
 from mace.calculators.mace import MACECalculator
 
@@ -601,14 +601,14 @@ def test_run_train_foundation_multihead(tmp_path, fitting_configs):
     assert np.allclose(Es, ref_Es, atol=1e-1)
 
 
-def test_run_train_foundation_multihead(tmp_path, fitting_configs):
+def test_run_train_foundation_multihead_json(tmp_path, fitting_configs):
     fitting_configs_dft = []
     fitting_configs_mp2 = []
     for i, c in enumerate(fitting_configs):
-        
+
         if i in (0, 1):
-            continue # skip isolated atoms, as energies specified by json files below
-        elif i % 2 == 0:
+            continue  # skip isolated atoms, as energies specified by json files below
+        if i % 2 == 0:
             c.info["head"] = "DFT"
             fitting_configs_dft.append(c)
         else:
@@ -619,14 +619,20 @@ def test_run_train_foundation_multihead(tmp_path, fitting_configs):
 
     # write E0s to json files
     E0s = {1: 0.0, 8: 0.0}
-    with open(tmp_path / "fit_multihead_dft.json", "w") as f:
+    with open(tmp_path / "fit_multihead_dft.json", "w", encoding="utf-8") as f:
         json.dump(E0s, f)
-    with open(tmp_path / "fit_multihead_mp2.json", "w") as f:
+    with open(tmp_path / "fit_multihead_mp2.json", "w", encoding="utf-8") as f:
         json.dump(E0s, f)
 
     heads = {
-        "DFT": {"train_file": f"{str(tmp_path)}/fit_multihead_dft.xyz", "E0s": f"{str(tmp_path)}/fit_multihead_dft.json"},
-        "MP2": {"train_file": f"{str(tmp_path)}/fit_multihead_mp2.xyz", "E0s": f"{str(tmp_path)}/fit_multihead_mp2.json"},
+        "DFT": {
+            "train_file": f"{str(tmp_path)}/fit_multihead_dft.xyz",
+            "E0s": f"{str(tmp_path)}/fit_multihead_dft.json",
+        },
+        "MP2": {
+            "train_file": f"{str(tmp_path)}/fit_multihead_mp2.xyz",
+            "E0s": f"{str(tmp_path)}/fit_multihead_mp2.json",
+        },
     }
     yaml_str = "heads:\n"
     for key, value in heads.items():
