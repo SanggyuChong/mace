@@ -442,6 +442,10 @@ class ScaleShiftMACE(MACE):
                 readout(node_feats, node_heads)[num_atoms_arange, node_heads]
             )  # {[n_nodes, ], }
 
+        # Pop the first prediction block from energies and features
+        node_es_list.pop(1)
+        node_feats_list.pop(0)
+
         # Concatenate node features
         node_feats_out = torch.cat(node_feats_list, dim=-1)
         # Sum over interactions
